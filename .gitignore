@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.log
+out.txt
+build/
+dist/
+release_full/
+release_min/
+release_*.zip
+*.exe
+.claude/
