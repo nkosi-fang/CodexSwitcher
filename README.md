@@ -3,7 +3,8 @@
 Codex 账号切换与中转站接口检测（仅支持 Windows）。
 
 ## 下载（Windows）
-- 前往 GitHub Releases 下载最新版本的 `CodexSwitcher_v2.exe`
+- 前往 GitHub Releases 下载最新版本：  
+  https://github.com/nkosi-fang/CodexSwitcher/releases/latest
 - 仅提供 Windows 版可执行文件
 
 ## 使用说明
