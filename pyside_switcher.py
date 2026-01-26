@@ -55,6 +55,8 @@ from codex_switcher import (
 
 
 APP_TITLE = "Codex Switcher"
+APP_VERSION = "2.0.0"
+APP_REPO = "nkosi-fang/CodexSwitcher"
 
 
 def run_in_ui(fn) -> None:
@@ -1821,14 +1823,38 @@ class SettingsPage(QtWidgets.QWidget):
         self.state = state
 
         layout = QtWidgets.QVBoxLayout(self)
-        header = QtWidgets.QLabel("设置 / 关于")
+        header = QtWidgets.QLabel("检查更新")
         header.setFont(self._header_font())
         layout.addWidget(header)
 
-        note = QtWidgets.QLabel("安装命令：npm i -g @openai/codex\n安装后请重新启动程序或终端")
+        info_group = QtWidgets.QGroupBox("版本信息")
+        apply_white_shadow(info_group)
+        info_layout = QtWidgets.QVBoxLayout(info_group)
+        self.current_version = QtWidgets.QLabel(f"当前版本：{APP_VERSION}")
+        self.latest_version = QtWidgets.QLabel("最新版本：-")
+        self.update_status = QtWidgets.QLabel("状态：未检查")
+        info_layout.addWidget(self.current_version)
+        info_layout.addWidget(self.latest_version)
+        info_layout.addWidget(self.update_status)
+        layout.addWidget(info_group)
+
+        action_row = QtWidgets.QHBoxLayout()
+        self.check_btn = QtWidgets.QPushButton("立即检查")
+        self.check_btn.clicked.connect(self.check_update)
+        self.open_release_btn = QtWidgets.QPushButton("打开发布页")
+        self.open_release_btn.clicked.connect(self.open_release_page)
+        action_row.addWidget(self.check_btn)
+        action_row.addWidget(self.open_release_btn)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
+
+        note = QtWidgets.QLabel("提示：需要可访问 GitHub 才能检测更新。发布页提供 Windows 可执行文件。")
         note.setStyleSheet("color: #AAA;")
         layout.addWidget(note)
         layout.addStretch(1)
+        self._latest_url = f"https://github.com/{APP_REPO}/releases/latest"
+        self._checked_once = False
+        self._notified = False
 
     def _header_font(self) -> QtGui.QFont:
         font = QtGui.QFont("Segoe UI", 12)
@@ -1836,7 +1862,78 @@ class SettingsPage(QtWidgets.QWidget):
         return font
 
     def on_show(self) -> None:
+        if not self._checked_once:
+            self._checked_once = True
+            self.check_update(auto=True)
         return
+
+    def open_release_page(self) -> None:
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl(self._latest_url))
+
+    def check_update(self, auto: bool = False) -> None:
+        self.check_btn.setEnabled(False)
+        self.update_status.setText("状态：检查中...")
+        self.latest_version.setText("最新版本：-")
+
+        def runner() -> None:
+            try:
+                ok, latest_ver, url, msg = self._get_latest_release()
+            except Exception as exc:
+                ok, latest_ver, url, msg = False, "-", "", str(exc)
+
+            def done() -> None:
+                self.check_btn.setEnabled(True)
+                if ok:
+                    self._latest_url = url or self._latest_url
+                    self.latest_version.setText(f"最新版本：{latest_ver}")
+                    status_text, has_update = self._compare_versions(APP_VERSION, latest_ver)
+                    self.update_status.setText(status_text)
+                    if has_update and not self._notified:
+                        self._notified = True
+                        message_info(self, "发现新版本", f"检测到新版本：{latest_ver}\n请前往发布页下载。")
+                else:
+                    self.update_status.setText(f"状态：{msg}")
+
+            run_in_ui(done)
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _get_latest_release(self) -> tuple[bool, str, str, str]:
+        try:
+            api_url = f"https://api.github.com/repos/{APP_REPO}/releases/latest"
+            req = urllib_request.Request(api_url, headers={"User-Agent": "CodexSwitcher"})
+            with urllib_request.urlopen(req, timeout=6) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            tag = data.get("tag_name") or data.get("name") or "未知"
+            url = data.get("html_url") or f"https://github.com/{APP_REPO}/releases/latest"
+            ver = self._extract_semver(tag) or tag
+            return True, ver, url, ""
+        except urllib_error.URLError:
+            return False, "-", "", "网络不可用或无法访问 GitHub，请检查网络/代理后重试。"
+        except Exception as exc:
+            return False, "-", "", str(exc)
+
+    def _extract_semver(self, text: str) -> Optional[str]:
+        match = re.search(r"\d+\.\d+\.\d+", text)
+        return match.group(0) if match else None
+
+    def _compare_versions(self, local: Optional[str], latest: Optional[str]) -> tuple[str, bool]:
+        local_sem = self._extract_semver(local or "")
+        latest_sem = self._extract_semver(latest or "")
+        if local_sem and latest_sem:
+            if local_sem == latest_sem:
+                return "状态：已是最新版本。", False
+            try:
+                local_parts = tuple(int(p) for p in local_sem.split("."))
+                latest_parts = tuple(int(p) for p in latest_sem.split("."))
+                if local_parts > latest_parts:
+                    return f"状态：本地版本 {local_sem} 高于最新 {latest_sem}。", False
+            except Exception:
+                pass
+            return f"状态：发现新版本 {latest_sem}。", True
+        if latest:
+            return f"状态：最新版本 {latest}。", False
+        return "状态：无法比较版本。", False
 
 
 
@@ -1881,7 +1978,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._add_nav_button(nav, "opencode 配置", "opencode")
         self._add_nav_button(nav, "多账号切换", "account")
         self._add_nav_button(nav, "中转站接口", "network")
-        self._add_nav_button(nav, "设置/关于", "settings")
+        self._add_nav_button(nav, "检查更新", "settings")
         nav.addStretch(1)
 
         self.show_page("account")

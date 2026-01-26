@@ -14,3 +14,13 @@ Codex 账号切换与中转站接口检测（仅支持 Windows）。
 ## 更新
 更新页面基于 GitHub Releases 提供版本检查与下载入口。
 
+## 依赖与第三方许可
+本项目为桌面版（Windows）打包发布，核心依赖包含：
+- PySide6（Qt for Python）
+- qt-material
+- requests
+- pillow
+- pyinstaller（用于打包）
+
+以上依赖均由其各自许可证约束。发布可执行文件时，建议在 Release 说明中保留第三方许可提示。
+
