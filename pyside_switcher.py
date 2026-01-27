@@ -11,6 +11,7 @@ import re
 import shutil
 import threading
 import ctypes
+import time
 from ctypes import wintypes
 from pathlib import Path
 from datetime import datetime
@@ -49,13 +50,12 @@ from codex_switcher import (
     post_json,
     save_store,
     set_active_account,
-    test_model,
     upsert_account,
 )
 
 
 APP_TITLE = "Codex Switcher"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 APP_REPO = "nkosi-fang/CodexSwitcher"
 
 
@@ -97,6 +97,282 @@ def log_diagnosis(title: str, detail: str) -> None:
             fh.write("\n\n")
     except Exception:
         return
+
+
+def probe_endpoints(
+    base: str,
+    api_key: str,
+    org_id: str,
+    model: str,
+    timeout: int = 60,
+) -> Dict[str, object]:
+    base = base.strip().rstrip("/")
+    base_host = extract_host(base)
+    if not base_host:
+        raise ValueError("Base URL 无效，无法解析主机")
+
+    def fmt_ms(value: object) -> str:
+        if isinstance(value, (int, float)):
+            return f"{value:.0f}ms"
+        return "不可用"
+
+    ping_avg, _loss = ping_average(base_host, 1)
+    http_avg = None
+    try:
+        http_avg = http_head_average(f"{base}/models", api_key, 1)
+    except Exception:
+        http_avg = None
+
+    port_ms = None
+    port_ok: Optional[bool] = None
+    try:
+        import socket
+
+        start = time.perf_counter()
+        with socket.create_connection((base_host, 443), timeout=3):
+            port_ms = (time.perf_counter() - start) * 1000
+            port_ok = True
+    except Exception:
+        port_ok = False
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if org_id:
+        headers["OpenAI-Organization"] = org_id
+
+    def get_json(url: str) -> tuple[bool, str]:
+        req = urllib_request.Request(url, headers=headers, method="GET")
+        try:
+            with urllib_request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="ignore")
+            return True, body
+        except urllib_error.HTTPError as exc:
+            try:
+                body = exc.read().decode("utf-8", errors="ignore")
+            except Exception:
+                body = ""
+            return False, f"HTTP {exc.code}: {body or exc.reason}"
+        except Exception as exc:
+            return False, str(exc)
+
+    embedding_model = "text-embedding-3-small"
+    moderation_model = "omni-moderation-latest"
+    skip_endpoints = {
+        "/realtime": "实时语音/文本会话（WebSocket 连接）",
+        "/assistants": "Assistants 工作流（需线程/工具配置）",
+        "/batch": "批处理任务（需上传文件）",
+        "/fine-tuning": "模型微调（需训练配置/文件）",
+        "/images/generations": "图像生成（需图像参数）",
+        "/images/edits": "图像编辑（需图像文件）",
+        "/videos": "视频生成（需视频参数）",
+        "/audio/speech": "语音合成（需音频参数）",
+        "/audio/transcriptions": "语音转写（需音频文件）",
+        "/audio/translations": "语音翻译（需音频文件）",
+    }
+
+    def request_endpoint(endpoint: str, url: str) -> tuple[bool, str]:
+        if endpoint == "/models":
+            return get_json(url)
+        if endpoint == "/moderations":
+            payload = {"model": moderation_model, "input": "hello"}
+            return post_json(url, headers, payload, timeout=timeout)
+        if endpoint == "/embeddings":
+            payload = {"model": embedding_model, "input": "hello"}
+            return post_json(url, headers, payload, timeout=timeout)
+        if endpoint == "/chat/completions":
+            payload = {"model": model, "messages": [{"role": "user", "content": "hello"}]}
+            return post_json(url, headers, payload, timeout=timeout)
+        if endpoint == "/completions":
+            payload = {"model": model, "prompt": "hello"}
+            return post_json(url, headers, payload, timeout=timeout)
+        payload = {"model": model, "input": "hello"}
+        return post_json(url, headers, payload, timeout=timeout)
+
+    model_supported: Optional[bool] = None
+    model_source = ""
+
+    def parse_models(body: str) -> set[str]:
+        try:
+            data = json.loads(body)
+        except Exception:
+            return set()
+        if isinstance(data, dict):
+            items = data.get("data")
+            if isinstance(items, list):
+                result: set[str] = set()
+                for item in items:
+                    if isinstance(item, dict):
+                        mid = item.get("id")
+                        if isinstance(mid, str):
+                            result.add(mid)
+                return result
+        return set()
+
+    def is_model_error(body: str) -> bool:
+        msg = str(body).lower()
+        if "model" not in msg:
+            return False
+        keywords = ("not found", "not allowed", "not supported", "does not exist", "invalid")
+        return any(k in msg for k in keywords)
+
+    def set_model_support(value: bool, source: str) -> None:
+        nonlocal model_supported, model_source
+        if value is True:
+            model_supported = True
+            model_source = source
+        elif model_supported is None:
+            model_supported = False
+            model_source = source
+
+    def build_candidates() -> list[tuple[str, str, str]]:
+        bases: list[str] = []
+        base_clean = base.rstrip("/")
+        bases.append(base_clean)
+        parsed = urlparse(base_clean)
+        base_path = parsed.path.rstrip("/")
+        if base_path.endswith("/v1"):
+            if base_path != "/v1":
+                root_v1 = f"{parsed.scheme}://{parsed.netloc}/v1"
+                bases.append(root_v1)
+        else:
+            bases.append(base_clean + "/v1")
+        # de-dup while preserving order
+        seen = set()
+        uniq_bases: list[str] = []
+        for item in bases:
+            if item in seen:
+                continue
+            seen.add(item)
+            uniq_bases.append(item)
+
+        candidates: list[tuple[str, str, str]] = []
+        for b in uniq_bases:
+            prefix = urlparse(b).path.rstrip("/")
+            for ep in (
+                "/responses",
+                "/chat/completions",
+                "/completions",
+                "/models",
+                "/embeddings",
+                "/moderations",
+                "/realtime",
+                "/assistants",
+                "/batch",
+                "/fine-tuning",
+                "/images/generations",
+                "/images/edits",
+                "/videos",
+                "/audio/speech",
+                "/audio/transcriptions",
+                "/audio/translations",
+            ):
+                url = b.rstrip("/") + ep
+                label = f"{prefix}{ep}" if prefix else ep
+                candidates.append((label, ep, url))
+        # de-dup by url
+        seen_url = set()
+        result: list[tuple[str, str, str]] = []
+        for label, ep, url in candidates:
+            if url in seen_url:
+                continue
+            seen_url.add(url)
+            result.append((label, ep, url))
+        return result
+
+    endpoints = build_candidates()
+    results = []
+    success_endpoint = ""
+    for label, ep, url in endpoints:
+        if ep in skip_endpoints:
+            results.append((label, ep, url, None, f"SKIP: {skip_endpoints[ep]}"))
+            continue
+        ok, body = request_endpoint(ep, url)
+        results.append((label, ep, url, ok, body))
+        if ok and ep in ("/responses", "/chat/completions", "/completions") and not success_endpoint:
+            success_endpoint = label
+
+    for _label, ep, _url, ok, body in results:
+        if ok and ep in ("/responses", "/chat/completions", "/completions"):
+            set_model_support(True, ep)
+        if ep == "/models" and ok:
+            models = parse_models(body)
+            if models:
+                set_model_support(model in models, "/models")
+    if model_supported is None:
+        for _label, ep, _url, ok, body in results:
+            if (ok is False) and ep in ("/responses", "/chat/completions", "/completions") and is_model_error(body):
+                set_model_support(False, ep)
+
+    model_text = "可用" if model_supported is True else "不可用" if model_supported is False else "未知"
+    model_hint = f"（来源: {model_source}）" if model_source else ""
+
+    errors_text = " ".join(str(body).lower() for _label, _ep, _url, _ok, body in results)
+    supported = [label for label, _ep, _url, ok, _body in results if ok]
+    supported_urls = []
+    for _label, _ep, url, ok, _body in results:
+        if ok and url not in supported_urls:
+            supported_urls.append(url)
+    supported_text = ", ".join(supported) if supported else "无"
+
+    if success_endpoint:
+        conclusion = f"结论：链路正常（API 请求成功，接口: {success_endpoint}）"
+    elif any(label.endswith("/models") for label in supported):
+        conclusion = "结论：仅 /models 可用，API 接口可能受限"
+    else:
+        if "401" in errors_text or "403" in errors_text or "auth" in errors_text:
+            conclusion = "结论：账号/密钥可能有误"
+        elif "404" in errors_text or "not found" in errors_text:
+            conclusion = "结论：接口可能不支持（请更换诊断接口）"
+        else:
+            conclusion = "结论：疑似中转服务异常"
+
+    summary_lines = []
+    summary_lines.append(f"Base URL: {base}")
+    summary_lines.append(f"Base Host: {base_host}")
+    summary_lines.append(
+        "Base 连通："
+        f"Ping={fmt_ms(ping_avg)} / "
+        f"HTTP={fmt_ms(http_avg)} / "
+        f"Port={'OK' if port_ok else 'FAIL' if port_ok is not None else '不可用'}"
+    )
+    summary_lines.append(f"\n可用接口：{supported_text}")
+    if supported_urls:
+        summary_lines.append("可用接口(URL)：")
+        for url in supported_urls:
+            summary_lines.append(f"- {url}")
+    summary_detail = "\n".join(summary_lines)
+
+    lines = list(summary_lines)
+    lines.append(f"模型可用性（{model}）：{model_text}{model_hint}")
+    lines.append(f"Embedding 测试模型：{embedding_model}")
+    lines.append(f"Moderation 测试模型：{moderation_model}")
+    lines.append("\n接口探测结果：")
+    for label, _ep, _url, ok, body in results:
+        if ok is True:
+            lines.append(f"- {label}: OK")
+        elif ok is False:
+            brief = str(body).splitlines()[0][:200] if body else "-"
+            lines.append(f"- {label}: FAIL ({brief})")
+        else:
+            lines.append(f"- {label}: {body}")
+    lines.append("\nAPI 请求结果：" + ("成功" if success_endpoint else "失败"))
+
+    detail = "\n".join(lines)
+    return {
+        "conclusion": conclusion,
+        "detail": detail,
+        "summary_detail": summary_detail,
+        "supported_labels": supported,
+        "supported_urls": supported_urls,
+        "model_supported": model_supported,
+        "model_source": model_source,
+        "success_endpoint": success_endpoint,
+        "results": results,
+        "base_host": base_host,
+        "port_ms": port_ms,
+    }
 
 
 class AppState:
@@ -296,7 +572,6 @@ class AccountPage(QtWidgets.QWidget):
             self.type_official.setChecked(True)
             return
         self.type_proxy.setChecked(True)
-
     def _header_font(self) -> QtGui.QFont:
         font = QtGui.QFont("Segoe UI", 12)
         font.setBold(True)
@@ -442,115 +717,6 @@ class AccountPage(QtWidgets.QWidget):
             message_error(self, "失败", str(exc))
 
 
-class ModelProbePage(QtWidgets.QWidget):
-    def __init__(self, state: AppState) -> None:
-        super().__init__()
-        self.state = state
-
-        layout = QtWidgets.QVBoxLayout(self)
-        header = QtWidgets.QLabel("账号池可用模型探测")
-        header.setFont(self._header_font())
-        layout.addWidget(header)
-
-        cfg_group = QtWidgets.QGroupBox("配置")
-        apply_white_shadow(cfg_group)
-        cfg_layout = QtWidgets.QHBoxLayout(cfg_group)
-        self.base_edit = QtWidgets.QLineEdit()
-        self.key_edit = QtWidgets.QLineEdit()
-        self.key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
-        self.retries_spin = QtWidgets.QSpinBox()
-        self.retries_spin.setRange(1, 20)
-        self.retries_spin.setValue(3)
-        self.timeout_spin = QtWidgets.QSpinBox()
-        self.timeout_spin.setRange(1, 999)
-        self.timeout_spin.setValue(90)
-        self.start_btn = QtWidgets.QPushButton("开始探测")
-        self.start_btn.clicked.connect(self.start_probe)
-        cfg_layout.addWidget(QtWidgets.QLabel("Base URL"))
-        cfg_layout.addWidget(self.base_edit, 1)
-        cfg_layout.addWidget(QtWidgets.QLabel("API Key"))
-        cfg_layout.addWidget(self.key_edit, 1)
-        cfg_layout.addWidget(QtWidgets.QLabel("重试次数"))
-        cfg_layout.addWidget(self.retries_spin)
-        cfg_layout.addWidget(QtWidgets.QLabel("超时(s)"))
-        cfg_layout.addWidget(self.timeout_spin)
-        cfg_layout.addWidget(self.start_btn)
-        layout.addWidget(cfg_group)
-
-        body = QtWidgets.QHBoxLayout()
-        layout.addLayout(body)
-
-        input_group = QtWidgets.QGroupBox("模型名称")
-        apply_white_shadow(input_group)
-        input_layout = QtWidgets.QVBoxLayout(input_group)
-        self.model_text = QtWidgets.QLineEdit()
-        self.model_text.setPlaceholderText("例如：gpt-5.2-codex")
-        input_layout.addWidget(self.model_text)
-        body.addWidget(input_group)
-
-        result_group = QtWidgets.QGroupBox("结果")
-        apply_white_shadow(result_group)
-        result_layout = QtWidgets.QVBoxLayout(result_group)
-        self.table = QtWidgets.QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["模型", "OK", "Endpoint", "错误"])
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        result_layout.addWidget(self.table)
-        body.addWidget(result_group)
-        body.setStretch(0, 1)
-        body.setStretch(1, 3)
-
-        self.status_label = QtWidgets.QLabel("就绪")
-        layout.addWidget(self.status_label)
-        layout.addStretch(1)
-
-    def _header_font(self) -> QtGui.QFont:
-        font = QtGui.QFont("Segoe UI", 12)
-        font.setBold(True)
-        return font
-
-    def on_show(self) -> None:
-        account = self.state.active_account
-        if account:
-            self.base_edit.setText(account.get("base_url", ""))
-            self.key_edit.setText(account.get("api_key", ""))
-
-    def start_probe(self) -> None:
-        base = self.base_edit.text().strip().rstrip("/")
-        api_key = self.key_edit.text().strip()
-        if not base or not api_key:
-            message_warn(self, "提示", "base_url 或 api_key 不能为空")
-            return
-        model = self.model_text.text().strip()
-        if not model:
-            message_warn(self, "提示", "请输入模型名称")
-            return
-        models = [model]
-        retries = int(self.retries_spin.value())
-        timeout = int(self.timeout_spin.value())
-        self.status_label.setText("探测中...")
-        self.table.setRowCount(0)
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-
-        def runner() -> None:
-            for model in models:
-                result = test_model(base, headers, model, retries=retries, wait_seconds=2, timeout=timeout)
-                run_in_ui(lambda r=result: self.append_result(r))
-            run_in_ui(lambda: self.status_label.setText("完成"))
-
-        threading.Thread(target=runner, daemon=True).start()
-
-    def append_result(self, result: Dict[str, object]) -> None:
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-        values = [result.get("model"), result.get("ok"), result.get("endpoint"), result.get("error")]
-        for col, value in enumerate(values):
-            self.table.setItem(row, col, QtWidgets.QTableWidgetItem(str(value)))
-
-
 class NetworkDiagnosticsPage(QtWidgets.QWidget):
     def __init__(self, state: AppState) -> None:
         super().__init__()
@@ -561,9 +727,9 @@ class NetworkDiagnosticsPage(QtWidgets.QWidget):
         header.setFont(self._header_font())
         layout.addWidget(header)
 
-        diag_group = QtWidgets.QGroupBox("关键诊断")
-        apply_white_shadow(diag_group)
-        diag_layout = QtWidgets.QVBoxLayout(diag_group)
+        self.diag_group = QtWidgets.QGroupBox("关键诊断")
+        apply_white_shadow(self.diag_group)
+        diag_layout = QtWidgets.QVBoxLayout(self.diag_group)
 
         row1 = QtWidgets.QHBoxLayout()
         row1.addWidget(QtWidgets.QLabel("当前 Base URL"))
@@ -590,7 +756,11 @@ class NetworkDiagnosticsPage(QtWidgets.QWidget):
 
         self.detail_text = QtWidgets.QPlainTextEdit()
         self.detail_text.setReadOnly(True)
-        self.detail_text.setMinimumHeight(60)
+        size_hint = self.detail_text.sizeHint().height()
+        if size_hint:
+            self.detail_text.setFixedHeight(max(60, size_hint // 2))
+        else:
+            self.detail_text.setMinimumHeight(60)
         diag_layout.addWidget(self.detail_text)
 
         copy_row = QtWidgets.QHBoxLayout()
@@ -600,11 +770,102 @@ class NetworkDiagnosticsPage(QtWidgets.QWidget):
         copy_row.addStretch(1)
         diag_layout.addLayout(copy_row)
 
-        layout.addWidget(diag_group)
+        layout.addWidget(self.diag_group, alignment=QtCore.Qt.AlignLeft)
+        self.probe_group = QtWidgets.QGroupBox("账号池可用模型探测")
+        apply_white_shadow(self.probe_group)
+        probe_layout = QtWidgets.QVBoxLayout(self.probe_group)
+        cfg_group = QtWidgets.QGroupBox("配置")
+        apply_white_shadow(cfg_group)
+        cfg_layout = QtWidgets.QHBoxLayout(cfg_group)
+        self.base_edit = QtWidgets.QLineEdit()
+        self.key_edit = QtWidgets.QLineEdit()
+        self.key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.retries_spin = QtWidgets.QSpinBox()
+        self.retries_spin.setRange(1, 20)
+        self.retries_spin.setValue(3)
+        self.timeout_spin = QtWidgets.QSpinBox()
+        self.timeout_spin.setRange(1, 999)
+        self.timeout_spin.setValue(90)
+        self.start_probe_btn = QtWidgets.QPushButton("开始探测")
+        self.start_probe_btn.clicked.connect(self.start_probe)
+        cfg_layout.addWidget(QtWidgets.QLabel("Base URL"))
+        cfg_layout.addWidget(self.base_edit, 1)
+        cfg_layout.addWidget(QtWidgets.QLabel("API Key"))
+        cfg_layout.addWidget(self.key_edit, 1)
+        cfg_layout.addWidget(QtWidgets.QLabel("重试次数"))
+        cfg_layout.addWidget(self.retries_spin)
+        cfg_layout.addWidget(QtWidgets.QLabel("超时(s)"))
+        cfg_layout.addWidget(self.timeout_spin)
+        cfg_layout.addWidget(self.start_probe_btn)
+        probe_layout.addWidget(cfg_group)
 
-        self.model_page = ModelProbePage(state)
-        layout.addWidget(self.model_page)
+        body = QtWidgets.QHBoxLayout()
+        probe_layout.addLayout(body)
+
+        input_group = QtWidgets.QGroupBox("模型名称")
+        apply_white_shadow(input_group)
+        input_layout = QtWidgets.QVBoxLayout(input_group)
+        self.model_text = QtWidgets.QLineEdit()
+        self.model_text.setPlaceholderText("例如：gpt-5.2-codex")
+        input_layout.addWidget(self.model_text)
+        body.addWidget(input_group)
+
+        result_group = QtWidgets.QGroupBox("结果")
+        apply_white_shadow(result_group)
+        result_layout = QtWidgets.QVBoxLayout(result_group)
+        self.table = QtWidgets.QTableWidget(0, 3)
+        self.table.setHorizontalHeaderLabels(["模型", "状态", "返回结果"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        header_h = self.table.horizontalHeader().height()
+        row_h = self.table.verticalHeader().defaultSectionSize()
+        self.table.setFixedHeight(header_h + row_h + 8)
+        result_layout.addWidget(self.table)
+        body.addWidget(result_group)
+        body.setStretch(0, 1)
+        body.setStretch(1, 3)
+
+        hint_group = QtWidgets.QGroupBox("提示")
+        apply_white_shadow(hint_group)
+        hint_layout = QtWidgets.QVBoxLayout(hint_group)
+        hint_label = QtWidgets.QLabel()
+        hint_label.setTextFormat(QtCore.Qt.RichText)
+        hint_label.setText(
+            '<ul style="margin:0 0 0 14px; padding:0; line-height:1.6;">'
+            '<li>中转站可用接口, 具体请与中转站沟通，有的中转站会采取封控措施禁用；</li>'
+            '<li>可用模型主要是在oai推出新模型时，查看中转站账号池中能不能使用的目的。</li>'
+            '<li>中转站账号池无号源时，理论上不影响中转站接口和模型探测。</li>'
+            '</ul>'
+        )
+        hint_label.setWordWrap(True)
+        hint_label.setStyleSheet("color: #666;")
+        hint_layout.addWidget(hint_label)
+        probe_layout.addWidget(hint_group)
+
+        self.probe_status_label = QtWidgets.QLabel("就绪")
+        probe_layout.addWidget(self.probe_status_label)
+
+        layout.addWidget(self.probe_group, alignment=QtCore.Qt.AlignLeft)
         layout.addStretch(1)
+
+    def _sync_card_widths(self) -> None:
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        parent_layout = parent.layout()
+        if parent_layout is None:
+            return
+        left = parent_layout.contentsMargins().left()
+        right = parent_layout.contentsMargins().right()
+        width = max(0, parent.width() - left - right)
+        if width <= 0:
+            return
+        self.diag_group.setFixedWidth(width)
+        self.probe_group.setFixedWidth(width)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._sync_card_widths()
 
     def _header_font(self) -> QtGui.QFont:
         font = QtGui.QFont("Segoe UI", 12)
@@ -623,10 +884,86 @@ class NetworkDiagnosticsPage(QtWidgets.QWidget):
         account = self.state.active_account
         base = account.get("base_url", "") if account else ""
         self.base_label.setText(base or "-")
-        if hasattr(self.model_page, "on_show"):
-            self.model_page.on_show()
+        self._sync_card_widths()
+        if hasattr(self, 'base_edit') and hasattr(self, 'key_edit'):
+            if account:
+                self.base_edit.setText(account.get('base_url', ''))
+                self.key_edit.setText(account.get('api_key', ''))
 
     
+    def start_probe(self) -> None:
+        base = self.base_edit.text().strip().rstrip("/")
+        api_key = self.key_edit.text().strip()
+        if not base or not api_key:
+            message_warn(self, "提示", "base_url 或 api_key 不能为空")
+            return
+        model = self.model_text.text().strip()
+        if not model:
+            message_warn(self, "提示", "请输入模型名称")
+            return
+        retries = int(self.retries_spin.value())
+        timeout = int(self.timeout_spin.value())
+        self.probe_status_label.setText("探测中...")
+        self.table.setRowCount(0)
+
+        org_id = ""
+        account = self.state.active_account
+        if account:
+            account_base = (account.get("base_url", "") or "").strip().rstrip("/")
+            account_key = (account.get("api_key", "") or "").strip()
+            if base == account_base and api_key == account_key:
+                org_id = (account.get("org_id", "") or "").strip()
+
+        def apply_result(result: Dict[str, object], conclusion: str) -> None:
+            self.append_result(result)
+            if conclusion:
+                self.probe_status_label.setText(conclusion)
+
+        def runner() -> None:
+            last_result = None
+            for attempt in range(1, retries + 1):
+                try:
+                    diag = probe_endpoints(base, api_key, org_id, model, timeout=timeout)
+                except Exception as exc:
+                    result = {"model": model, "ok": False, "endpoint": "", "error": str(exc)}
+                    last_result = (result, "探测失败")
+                    break
+                ok_value = diag.get("model_supported")
+                endpoint = diag.get("model_source") or diag.get("success_endpoint") or ""
+                error = "" if ok_value is True else diag.get("conclusion", "")
+                result = {"model": model, "ok": ok_value, "endpoint": endpoint, "error": error}
+                last_result = (result, diag.get("conclusion", "完成"))
+                if ok_value is True or diag.get("success_endpoint"):
+                    break
+                if attempt < retries:
+                    time.sleep(2)
+            if last_result:
+                result, conclusion = last_result
+                run_in_ui(lambda r=result, c=conclusion: apply_result(r, c))
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _append_row(self, values: list[object]) -> None:
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        for col, value in enumerate(values):
+            self.table.setItem(row, col, QtWidgets.QTableWidgetItem(str(value)))
+
+    def append_result(self, result: Dict[str, object]) -> None:
+        ok_value = result.get("ok")
+        if ok_value is True:
+            ok_text = "该模型可用"
+        elif ok_value is False:
+            ok_text = "该模型不可用"
+        else:
+            ok_text = "未知"
+        if ok_value is True:
+            return_value = result.get("endpoint")
+        else:
+            return_value = result.get("error") or ""
+        values = [result.get("model"), ok_text, return_value]
+        self._append_row(values)
+
     def start_diagnosis(self) -> None:
         account = self.state.active_account
         if not account:
@@ -651,259 +988,20 @@ class NetworkDiagnosticsPage(QtWidgets.QWidget):
 
         def runner() -> None:
             try:
-                def fmt_ms(value: object) -> str:
-                    if isinstance(value, (int, float)):
-                        return f"{value:.0f}ms"
-                    return "不可用"
-
-                ping_avg, _loss = ping_average(base_host, 1)
-                http_avg = None
-                try:
-                    http_avg = http_head_average(f"{base}/models", api_key, 1)
-                except Exception:
-                    http_avg = None
-
-                port_ms = None
-                port_ok: Optional[bool] = None
-                try:
-                    import socket
-                    start = time.perf_counter()
-                    with socket.create_connection((base_host, 443), timeout=3):
-                        port_ms = (time.perf_counter() - start) * 1000
-                        port_ok = True
-                except Exception:
-                    port_ok = False
-
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                }
-                if org_id:
-                    headers["OpenAI-Organization"] = org_id
-
-                def get_json(url: str, timeout: int = 60) -> tuple[bool, str]:
-                    req = urllib_request.Request(url, headers=headers, method="GET")
-                    try:
-                        with urllib_request.urlopen(req, timeout=timeout) as resp:
-                            body = resp.read().decode("utf-8", errors="ignore")
-                        return True, body
-                    except urllib_error.HTTPError as exc:
-                        try:
-                            body = exc.read().decode("utf-8", errors="ignore")
-                        except Exception:
-                            body = ""
-                        return False, f"HTTP {exc.code}: {body or exc.reason}"
-                    except Exception as exc:
-                        return False, str(exc)
-
-                embedding_model = "text-embedding-3-small"
-                moderation_model = "omni-moderation-latest"
-                skip_endpoints = {
-                    "/realtime": "实时语音/文本会话（WebSocket 连接）",
-                    "/assistants": "Assistants 工作流（需线程/工具配置）",
-                    "/batch": "批处理任务（需上传文件）",
-                    "/fine-tuning": "模型微调（需训练配置/文件）",
-                    "/images/generations": "图像生成（需图像参数）",
-                    "/images/edits": "图像编辑（需图像文件）",
-                    "/videos": "视频生成（需视频参数）",
-                    "/audio/speech": "语音合成（需音频参数）",
-                    "/audio/transcriptions": "语音转写（需音频文件）",
-                    "/audio/translations": "语音翻译（需音频文件）",
-                }
-
-                def request_endpoint(endpoint: str, url: str) -> tuple[bool, str]:
-                    if endpoint == "/models":
-                        return get_json(url)
-                    if endpoint == "/moderations":
-                        payload = {"model": moderation_model, "input": "hello"}
-                        return post_json(url, headers, payload, timeout=60)
-                    if endpoint == "/embeddings":
-                        payload = {"model": embedding_model, "input": "hello"}
-                        return post_json(url, headers, payload, timeout=60)
-                    if endpoint == "/chat/completions":
-                        payload = {"model": model, "messages": [{"role": "user", "content": "hello"}]}
-                        return post_json(url, headers, payload, timeout=60)
-                    if endpoint == "/completions":
-                        payload = {"model": model, "prompt": "hello"}
-                        return post_json(url, headers, payload, timeout=60)
-                    payload = {"model": model, "input": "hello"}
-                    return post_json(url, headers, payload, timeout=60)
-
-                model_supported: Optional[bool] = None
-                model_source = ""
-
-                def parse_models(body: str) -> set[str]:
-                    try:
-                        data = json.loads(body)
-                    except Exception:
-                        return set()
-                    if isinstance(data, dict):
-                        items = data.get("data")
-                        if isinstance(items, list):
-                            result: set[str] = set()
-                            for item in items:
-                                if isinstance(item, dict):
-                                    mid = item.get("id")
-                                    if isinstance(mid, str):
-                                        result.add(mid)
-                            return result
-                    return set()
-
-                def is_model_error(body: str) -> bool:
-                    msg = str(body).lower()
-                    if "model" not in msg:
-                        return False
-                    keywords = ("not found", "not allowed", "not supported", "does not exist", "invalid")
-                    return any(k in msg for k in keywords)
-
-                def set_model_support(value: bool, source: str) -> None:
-                    nonlocal model_supported, model_source
-                    if value is True:
-                        model_supported = True
-                        model_source = source
-                    elif model_supported is None:
-                        model_supported = False
-                        model_source = source
-
-                def build_candidates() -> list[tuple[str, str, str]]:
-                    bases: list[str] = []
-                    base_clean = base.rstrip("/")
-                    bases.append(base_clean)
-                    parsed = urlparse(base_clean)
-                    base_path = parsed.path.rstrip("/")
-                    if base_path.endswith("/v1"):
-                        if base_path != "/v1":
-                            root_v1 = f"{parsed.scheme}://{parsed.netloc}/v1"
-                            bases.append(root_v1)
-                    else:
-                        bases.append(base_clean + "/v1")
-                    # de-dup while preserving order
-                    seen = set()
-                    uniq_bases: list[str] = []
-                    for item in bases:
-                        if item in seen:
-                            continue
-                        seen.add(item)
-                        uniq_bases.append(item)
-
-                    candidates: list[tuple[str, str, str]] = []
-                    for b in uniq_bases:
-                        prefix = urlparse(b).path.rstrip("/")
-                        for ep in (
-                            "/responses",
-                            "/chat/completions",
-                            "/completions",
-                            "/models",
-                            "/embeddings",
-                            "/moderations",
-                            "/realtime",
-                            "/assistants",
-                            "/batch",
-                            "/fine-tuning",
-                            "/images/generations",
-                            "/images/edits",
-                            "/videos",
-                            "/audio/speech",
-                            "/audio/transcriptions",
-                            "/audio/translations",
-                        ):
-                            url = b.rstrip("/") + ep
-                            label = f"{prefix}{ep}" if prefix else ep
-                            candidates.append((label, ep, url))
-                    # de-dup by url
-                    seen_url = set()
-                    result: list[tuple[str, str, str]] = []
-                    for label, ep, url in candidates:
-                        if url in seen_url:
-                            continue
-                        seen_url.add(url)
-                        result.append((label, ep, url))
-                    return result
-
-                endpoints = build_candidates()
-                results = []
-                success_endpoint = ""
-                for label, ep, url in endpoints:
-                    if ep in skip_endpoints:
-                        results.append((label, ep, url, None, f"SKIP: {skip_endpoints[ep]}"))
-                        continue
-                    ok, body = request_endpoint(ep, url)
-                    results.append((label, ep, url, ok, body))
-                    if ok and ep in ("/responses", "/chat/completions", "/completions") and not success_endpoint:
-                        success_endpoint = label
-
-                for label, ep, _url, ok, body in results:
-                    if ok and ep in ("/responses", "/chat/completions", "/completions"):
-                        set_model_support(True, ep)
-                    if ep == "/models" and ok:
-                        models = parse_models(body)
-                        if models:
-                            set_model_support(model in models, "/models")
-                if model_supported is None:
-                    for label, ep, _url, ok, body in results:
-                        if (ok is False) and ep in ("/responses", "/chat/completions", "/completions") and is_model_error(body):
-                            set_model_support(False, ep)
-
-                model_text = "可用" if model_supported is True else "不可用" if model_supported is False else "未知"
-                model_hint = f"（来源: {model_source}）" if model_source else ""
-
-                errors_text = " ".join(str(body).lower() for _label, _ep, _url, _ok, body in results)
-                supported = [label for label, _ep, _url, ok, _body in results if ok]
-                supported_urls = []
-                for label, _ep, url, ok, _body in results:
-                    if ok and url not in supported_urls:
-                        supported_urls.append(url)
-                supported_text = ", ".join(supported) if supported else "无"
-
-                if success_endpoint:
-                    conclusion = f"结论：链路正常（API 请求成功，接口: {success_endpoint}）"
-                elif any(label.endswith("/models") for label in supported):
-                    conclusion = "结论：仅 /models 可用，API 接口可能受限"
-                else:
-                    if "401" in errors_text or "403" in errors_text or "auth" in errors_text:
-                        conclusion = "结论：账号/密钥可能有误"
-                    elif "404" in errors_text or "not found" in errors_text:
-                        conclusion = "结论：接口可能不支持（请更换诊断接口）"
-                    else:
-                        conclusion = "结论：疑似中转服务异常"
-
-                lines = []
-                lines.append(f"Base URL: {base}")
-                lines.append(f"Base Host: {base_host}")
-                lines.append(
-                    "Base 连通："
-                    f"Ping={fmt_ms(ping_avg)} / "
-                    f"HTTP={fmt_ms(http_avg)} / "
-                    f"Port={'OK' if port_ok else 'FAIL' if port_ok is not None else '不可用'}"
-                )
-                lines.append(f"\n可用接口：{supported_text}")
-                if supported_urls:
-                    lines.append("可用接口(URL)：")
-                    for url in supported_urls:
-                        lines.append(f"- {url}")
-                lines.append(f"模型可用性（{model}）：{model_text}{model_hint}")
-                lines.append(f"Embedding 测试模型：{embedding_model}")
-                lines.append(f"Moderation 测试模型：{moderation_model}")
-                lines.append("\n接口探测结果：")
-                for label, _ep, _url, ok, body in results:
-                    if ok is True:
-                        lines.append(f"- {label}: OK")
-                    elif ok is False:
-                        brief = str(body).splitlines()[0][:200] if body else "-"
-                        lines.append(f"- {label}: FAIL ({brief})")
-                    else:
-                        lines.append(f"- {label}: {body}")
-                lines.append("\nAPI 请求结果：" + ("成功" if success_endpoint else "失败"))
-
-                detail = "\n".join(lines)
-                self._supported_labels = supported
-                self._supported_urls = supported_urls
-                if not success_endpoint:
+                diagnosis = probe_endpoints(base, api_key, org_id, model, timeout=60)
+                conclusion = diagnosis.get("conclusion", "结论：诊断失败")
+                detail = diagnosis.get("detail", "")
+                summary_detail = diagnosis.get("summary_detail", detail)
+                supported = diagnosis.get("supported_labels", [])
+                supported_urls = diagnosis.get("supported_urls", [])
+                if not diagnosis.get("success_endpoint"):
                     log_diagnosis("诊断失败", f"{conclusion}\n{detail}")
                 def done() -> None:
                     self.run_btn.setEnabled(True)
                     self.conclusion_label.setText(conclusion)
-                    self.detail_text.setPlainText(detail)
+                    self.detail_text.setPlainText(summary_detail)
+                    self._supported_labels = supported
+                    self._supported_urls = supported_urls
 
                 run_in_ui(done)
             except Exception as exc:
@@ -917,7 +1015,6 @@ class NetworkDiagnosticsPage(QtWidgets.QWidget):
                 run_in_ui(done)
 
         threading.Thread(target=runner, daemon=True).start()
-
 
 class CodexStatusPage(QtWidgets.QWidget):
     def __init__(self, state: AppState) -> None:
@@ -1838,6 +1935,15 @@ class SettingsPage(QtWidgets.QWidget):
         info_layout.addWidget(self.update_status)
         layout.addWidget(info_group)
 
+        notes_group = QtWidgets.QGroupBox("更新内容")
+        apply_white_shadow(notes_group)
+        notes_layout = QtWidgets.QVBoxLayout(notes_group)
+        self.release_notes = QtWidgets.QPlainTextEdit()
+        self.release_notes.setReadOnly(True)
+        self.release_notes.setMinimumHeight(120)
+        notes_layout.addWidget(self.release_notes)
+        layout.addWidget(notes_group)
+
         action_row = QtWidgets.QHBoxLayout()
         self.check_btn = QtWidgets.QPushButton("立即检查")
         self.check_btn.clicked.connect(self.check_update)
@@ -1847,9 +1953,21 @@ class SettingsPage(QtWidgets.QWidget):
         action_row.addWidget(self.open_release_btn)
         action_row.addStretch(1)
         layout.addLayout(action_row)
-
-        note = QtWidgets.QLabel("提示：需要可访问 GitHub 才能检测更新。发布页提供 Windows 可执行文件。")
-        note.setStyleSheet("color: #AAA;")
+        note = QtWidgets.QLabel(
+            "各位佬<br><br>"
+            "感谢使用 Codex Switcher。因为市面上已经有类似 CC Switch 这类成熟的多账号管理工具，"
+            "本项目本质上就是一个套娃工具，对 config.toml、auth.json、opencode.json 文件读取和修改。<br><br>"
+            "一开始我只是作为一个切换脚本供自己使用的。后来无意中分享给了一位群友，并在他的建议下进一步做了 UI 界面。<br><br>"
+            "我深知产品本身有很多不足和 bug，同时从我自己的做产品的初衷，我也想添加更多功能进去，"
+            "比如：对 codex vs code 插件的修改、比如本地代理环境的检测……无奈作为一个独立开发者，"
+            "手里有太多的活要干，只能闲暇之余再慢慢 debug 和升级。<br><br>"
+            "如果对本产品有更好的建议和反馈，欢迎随时反馈，你们的反馈，是推动我持续修改和完善的唯一动力。<br><br>"
+            "反馈渠道：L站、GitHub 或者电子邮件：nkosi.fang@gmail.com<br>"
+            "<div style=\"text-align:right;\">— nkosi</div>"
+        )
+        note.setStyleSheet("color: #000;")
+        note.setWordWrap(True)
+        note.setTextFormat(QtCore.Qt.RichText)
         layout.addWidget(note)
         layout.addStretch(1)
         self._latest_url = f"https://github.com/{APP_REPO}/releases/latest"
@@ -1874,18 +1992,28 @@ class SettingsPage(QtWidgets.QWidget):
         self.check_btn.setEnabled(False)
         self.update_status.setText("状态：检查中...")
         self.latest_version.setText("最新版本：-")
+        if hasattr(self, "release_notes"):
+            self.release_notes.setPlainText("正在获取更新内容...")
 
         def runner() -> None:
             try:
                 ok, latest_ver, url, msg = self._get_latest_release()
             except Exception as exc:
                 ok, latest_ver, url, msg = False, "-", "", str(exc)
+            notes_text = ""
+            if ok:
+                try:
+                    notes_text = self._get_release_notes(APP_VERSION, latest_ver)
+                except Exception as exc:
+                    notes_text = f"无法获取更新内容：{exc}"
 
             def done() -> None:
                 self.check_btn.setEnabled(True)
                 if ok:
                     self._latest_url = url or self._latest_url
                     self.latest_version.setText(f"最新版本：{latest_ver}")
+                    if hasattr(self, "release_notes"):
+                        self.release_notes.setPlainText(notes_text or "无更新内容")
                     status_text, has_update = self._compare_versions(APP_VERSION, latest_ver)
                     self.update_status.setText(status_text)
                     if has_update and not self._notified:
@@ -1893,10 +2021,66 @@ class SettingsPage(QtWidgets.QWidget):
                         message_info(self, "发现新版本", f"检测到新版本：{latest_ver}\n请前往发布页下载。")
                 else:
                     self.update_status.setText(f"状态：{msg}")
+                    if hasattr(self, "release_notes"):
+                        self.release_notes.setPlainText(msg)
 
             run_in_ui(done)
 
         threading.Thread(target=runner, daemon=True).start()
+
+    def _get_release_notes(self, local_ver: str, latest_ver: str) -> str:
+        local_sem = self._extract_semver(local_ver) or local_ver
+        latest_sem = self._extract_semver(latest_ver) or latest_ver
+        if not local_sem or not latest_sem:
+            return "无法解析版本号，无法生成更新内容。"
+        if local_sem == latest_sem:
+            return "已是最新版本，无需更新。"
+
+        def parts(ver: str):
+            try:
+                return tuple(int(p) for p in ver.split("."))
+            except Exception:
+                return ()
+
+        local_parts = parts(local_sem)
+        latest_parts = parts(latest_sem)
+        if not local_parts or not latest_parts:
+            return "无法解析版本号，无法生成更新内容。"
+
+        api_url = f"https://api.github.com/repos/{APP_REPO}/releases?per_page=20"
+        req = urllib_request.Request(api_url, headers={"User-Agent": "CodexSwitcher"})
+        with urllib_request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if not isinstance(data, list):
+            return "无法获取更新内容。"
+
+        lines = [f"本地版本：{local_sem}", f"最新版本：{latest_sem}", ""]
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            tag = item.get("tag_name") or item.get("name") or ""
+            ver = self._extract_semver(tag)
+            if not ver:
+                continue
+            ver_parts = parts(ver)
+            if not ver_parts or ver_parts <= local_parts:
+                continue
+            title = item.get("name") or tag
+            body = item.get("body") or ""
+            body_lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
+            body_preview = []
+            for ln in body_lines:
+                body_preview.append(f"  - {ln}")
+                if len(body_preview) >= 5:
+                    break
+            lines.append(f"[{ver}] {title}")
+            if body_preview:
+                lines.extend(body_preview)
+            lines.append("")
+
+        if len(lines) <= 3:
+            return "未找到比本地版本更新的发布内容。"
+        return "\n".join(lines).strip()
 
     def _get_latest_release(self) -> tuple[bool, str, str, str]:
         try:

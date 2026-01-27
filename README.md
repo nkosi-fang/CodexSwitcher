@@ -1,6 +1,8 @@
 # CodexSwitcher
 
-Codex 账号切换与中转站接口检测（仅支持 Windows）。
+当前版本：v2.0.1
+
+Codex 账号切换与中转站接口检测（仅支持 Windows）。支持在 Codex CLI 与 OpenCode 终端中进行 Codex 账户多账号管理。
 
 ## 下载（Windows）
 - 前往 GitHub Releases 下载最新版本：  
