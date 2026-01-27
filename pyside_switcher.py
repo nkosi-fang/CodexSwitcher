@@ -55,7 +55,7 @@ from codex_switcher import (
 
 
 APP_TITLE = "Codex Switcher"
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 APP_REPO = "nkosi-fang/CodexSwitcher"
 
 
@@ -135,9 +135,15 @@ def probe_endpoints(
     except Exception:
         port_ok = False
 
+    user_agent = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
+        "User-Agent": user_agent,
     }
     if org_id:
         headers["OpenAI-Organization"] = org_id
@@ -836,7 +842,7 @@ class NetworkDiagnosticsPage(QtWidgets.QWidget):
         hint_label.setTextFormat(QtCore.Qt.RichText)
         hint_label.setText(
             '<ul style="margin:0 0 0 14px; padding:0; line-height:1.6;">'
-            '<li>中转站可用接口, 具体请与中转站沟通，有的中转站会采取封控措施禁用；</li>'
+            '<li>本工具使用UA请求方式探测，但也有被中转站/WAF风控拦截的可能性，请检查日志文件 .codex\codex_switcher.log。</li>'
             '<li>可用模型主要是在oai推出新模型时，查看中转站账号池中能不能使用的目的。</li>'
             '<li>中转站账号池无号源时，理论上不影响中转站接口和模型探测。</li>'
             '</ul>'

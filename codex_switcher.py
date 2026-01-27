@@ -258,7 +258,12 @@ def http_head_average(url: str, api_key: str, attempts: int) -> Optional[float]:
         raise RuntimeError(
             "缺少 requests 依赖，请先执行：pip install requests"
         ) from exc
-    headers = {}
+    user_agent = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    )
+    headers = {"User-Agent": user_agent}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     verify = True
