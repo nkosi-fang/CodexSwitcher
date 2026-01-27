@@ -1,9 +1,20 @@
 # -*- mode: python ; coding: utf-8 -*-
 import sys
+import re
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_all
 
 project_root = Path(sys.argv[0]).resolve().parent
+ui_path = project_root / 'pyside_switcher.py'
+APP_VERSION = 'unknown'
+try:
+    content = ui_path.read_text(encoding='utf-8')
+    m = re.search(r"APP_VERSION\s*=\s*['\"]([^'\"]+)['\"]", content)
+    if m:
+        APP_VERSION = m.group(1)
+except Exception:
+    pass
+
 icon_path = project_root / "icon_app.ico"
 
 all_datas = []
@@ -44,7 +55,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name="CodexSwitcher_v2",
+    name=f"CodexSwitcher_v{APP_VERSION}",
     icon=str(icon_path),
     debug=False,
     bootloader_ignore_signals=False,

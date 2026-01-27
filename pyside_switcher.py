@@ -395,21 +395,22 @@ class AccountPage(QtWidgets.QWidget):
         header.setFont(self._header_font())
         layout.addWidget(header)
 
-        list_width = 320
-        form_width = 360
+        list_width = 280
+        form_width = 320
         card_gap = 12
         account_group_width = list_width + form_width + card_gap + 10
 
         current_group = QtWidgets.QGroupBox("当前账号")
         apply_white_shadow(current_group)
-        current_group.setFixedWidth(account_group_width)
+        current_group.setMinimumWidth(account_group_width)
+        current_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         current_layout = QtWidgets.QHBoxLayout(current_group)
         self.current_label = QtWidgets.QLabel("未选择")
         self.current_label.setWordWrap(False)
         self.current_label.setToolTip("未选择")
         current_layout.addWidget(self.current_label)
         current_layout.addStretch(1)
-        layout.addWidget(current_group, alignment=QtCore.Qt.AlignLeft)
+        layout.addWidget(current_group)
 
         body = QtWidgets.QHBoxLayout()
         body.setSpacing(card_gap)
@@ -417,13 +418,15 @@ class AccountPage(QtWidgets.QWidget):
 
         account_group = QtWidgets.QGroupBox("多账号管理")
         apply_white_shadow(account_group)
-        account_group.setFixedWidth(account_group_width)
+        account_group.setMinimumWidth(account_group_width)
+        account_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         account_layout = QtWidgets.QHBoxLayout(account_group)
         account_layout.setSpacing(card_gap)
 
         # 左侧列表
         list_panel = QtWidgets.QWidget()
-        list_panel.setFixedWidth(list_width)
+        list_panel.setMinimumWidth(list_width)
+        list_panel.setSizePolicy(QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Preferred)
         list_layout = QtWidgets.QVBoxLayout(list_panel)
         list_title = QtWidgets.QLabel("账号列表")
         list_layout.addWidget(list_title)
@@ -446,7 +449,8 @@ class AccountPage(QtWidgets.QWidget):
 
         # 右侧表单
         form_panel = QtWidgets.QWidget()
-        form_panel.setFixedWidth(form_width)
+        form_panel.setMinimumWidth(form_width)
+        form_panel.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         form_panel_layout = QtWidgets.QVBoxLayout(form_panel)
         form_title = QtWidgets.QLabel("新增/更新账号")
         form_panel_layout.addWidget(form_title)
@@ -504,11 +508,11 @@ class AccountPage(QtWidgets.QWidget):
         account_layout.addWidget(form_panel)
 
         body.addWidget(account_group)
-        body.addStretch(1)
 
         hint_group = QtWidgets.QGroupBox("提示")
         apply_white_shadow(hint_group)
-        hint_group.setFixedWidth(account_group_width)
+        hint_group.setMinimumWidth(account_group_width)
+        hint_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         hint_layout = QtWidgets.QVBoxLayout(hint_group)
         hint_label = QtWidgets.QLabel()
         hint_label.setTextFormat(QtCore.Qt.RichText)
@@ -523,7 +527,7 @@ class AccountPage(QtWidgets.QWidget):
         hint_label.setWordWrap(True)
         hint_label.setStyleSheet("color: #666;")
         hint_layout.addWidget(hint_label)
-        layout.addWidget(hint_group, alignment=QtCore.Qt.AlignLeft)
+        layout.addWidget(hint_group)
 
         layout.addStretch(1)
 
@@ -849,15 +853,11 @@ class NetworkDiagnosticsPage(QtWidgets.QWidget):
         layout.addStretch(1)
 
     def _sync_card_widths(self) -> None:
-        parent = self.parentWidget()
-        if parent is None:
+        layout = self.layout()
+        if layout is None:
             return
-        parent_layout = parent.layout()
-        if parent_layout is None:
-            return
-        left = parent_layout.contentsMargins().left()
-        right = parent_layout.contentsMargins().right()
-        width = max(0, parent.width() - left - right)
+        margins = layout.contentsMargins()
+        width = max(0, self.width() - margins.left() - margins.right())
         if width <= 0:
             return
         self.diag_group.setFixedWidth(width)
@@ -1068,10 +1068,12 @@ class CodexStatusPage(QtWidgets.QWidget):
         layout.addWidget(self.compare_status)
 
         debug_group = QtWidgets.QGroupBox("诊断信息")
+        debug_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         debug_layout = QtWidgets.QVBoxLayout(debug_group)
         self.debug_text = QtWidgets.QPlainTextEdit()
         self.debug_text.setReadOnly(True)
         self.debug_text.setMinimumHeight(140)
+        self.debug_text.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         debug_layout.addWidget(self.debug_text)
 
         debug_btn_row = QtWidgets.QHBoxLayout()
@@ -1081,8 +1083,8 @@ class CodexStatusPage(QtWidgets.QWidget):
         debug_btn_row.addStretch(1)
         debug_layout.addLayout(debug_btn_row)
         layout.addWidget(debug_group)
+        layout.setStretch(layout.count() - 1, 1)
 
-        layout.addStretch(1)
 
     def _header_font(self) -> QtGui.QFont:
         font = QtGui.QFont("Segoe UI", 12)
@@ -1953,22 +1955,23 @@ class SettingsPage(QtWidgets.QWidget):
         action_row.addWidget(self.open_release_btn)
         action_row.addStretch(1)
         layout.addLayout(action_row)
+        letter_group = QtWidgets.QGroupBox("开发者留言")
+        apply_white_shadow(letter_group)
+        letter_layout = QtWidgets.QVBoxLayout(letter_group)
         note = QtWidgets.QLabel(
-            "各位佬<br><br>"
-            "感谢使用 Codex Switcher。因为市面上已经有类似 CC Switch 这类成熟的多账号管理工具，"
-            "本项目本质上就是一个套娃工具，对 config.toml、auth.json、opencode.json 文件读取和修改。<br><br>"
-            "一开始我只是作为一个切换脚本供自己使用的。后来无意中分享给了一位群友，并在他的建议下进一步做了 UI 界面。<br><br>"
-            "我深知产品本身有很多不足和 bug，同时从我自己的做产品的初衷，我也想添加更多功能进去，"
-            "比如：对 codex vs code 插件的修改、比如本地代理环境的检测……无奈作为一个独立开发者，"
-            "手里有太多的活要干，只能闲暇之余再慢慢 debug 和升级。<br><br>"
-            "如果对本产品有更好的建议和反馈，欢迎随时反馈，你们的反馈，是推动我持续修改和完善的唯一动力。<br><br>"
-            "反馈渠道：L站、GitHub 或者电子邮件：nkosi.fang@gmail.com<br>"
-            "<div style=\"text-align:right;\">— nkosi</div>"
+            "各位佬：<br><br>"
+            "感谢使用Codex Switcher。因为市面上已经有太多类似CC switch的成熟多账号管理工具。本质上，这就是一个套娃工具，基于对config.toml、auth.json、opencode.json 文件读取和修改，一开始我只是作为一个切换脚本供自己便用的。后来无意中分享给了一位群友，并在他的建议下进一步做了UI界面。<br><br>"
+            "我深知如果把它作为一个产品来说，本身是有很多不足和bug的；再者从我自己的使用习惯和角度来说，主力就是codex，所以开发时并没有考虑添加claude code的账号管理功能，以及对一些优秀的国产大模型的支持。我甚至有想过用Rust来重构，因为开源项目本身就是靠情怀支撑的。<br><br>"
+            "无奈手里还有太多的活要干（要给自己赚工资），只能利用闲暇之余，再慢慢debug和升级。<br><br>"
+            "如果佬对本产品有更好的想法和建议，欢迎交流、反馈，更欢迎您一起""fork+pr""，共同推动这个小工具的进步，这大概是我们在AI大浪潮席卷的时代，能够唯一留下的轻微足迹。<br><br>"
+            "反馈渠道:    L站、GitHub或者电子邮件:nkosi.fang@gmail.com<br>"
+            "<div style=\"text-align:right;\">nkosi</div>"
         )
         note.setStyleSheet("color: #000;")
         note.setWordWrap(True)
         note.setTextFormat(QtCore.Qt.RichText)
-        layout.addWidget(note)
+        letter_layout.addWidget(note)
+        layout.addWidget(letter_group)
         layout.addStretch(1)
         self._latest_url = f"https://github.com/{APP_REPO}/releases/latest"
         self._checked_once = False
@@ -2130,15 +2133,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if icon_path.exists():
             self.setWindowIcon(QtGui.QIcon(str(icon_path)))
         self.resize(860, 620)
-        self.setFixedSize(860, 620)
+        self.setMinimumSize(860, 620)
         self.state = AppState()
         central = QtWidgets.QWidget()
         central.setObjectName("appRoot")
         root = QtWidgets.QHBoxLayout(central)
         self.setCentralWidget(central)
 
-        nav = QtWidgets.QVBoxLayout()
-        root.addLayout(nav)
+        nav_widget = QtWidgets.QWidget()
+        nav = QtWidgets.QVBoxLayout(nav_widget)
+        root.addWidget(nav_widget)
+        nav_widget.setFixedWidth(140)
 
         self.stack = QtWidgets.QStackedWidget()
         root.addWidget(self.stack, 1)
