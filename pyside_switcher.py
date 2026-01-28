@@ -2558,11 +2558,10 @@ class SessionManagerPage(QtWidgets.QWidget):
         if isinstance(data, dict):
             self._render_detail(data)
 
-    def _render_detail(self, meta: dict) -> None:
+    def _build_rendered_text(self, meta: dict, only_ua: bool) -> str:
         path = meta.get("path", "")
         if not path:
-            return
-        only_ua = self.only_ua_check.isChecked()
+            return ""
         lines = []
         lines.append(f"时间：{meta.get('time_display', '-')}")
         lines.append(f"模型：{meta.get('model', '-')}")
@@ -2570,6 +2569,8 @@ class SessionManagerPage(QtWidgets.QWidget):
         lines.append(f"目录：{meta.get('cwd', '-')}")
         lines.append(f"文件：{path}")
         lines.append("")
+        prev_role = None
+        separator = "-" * 30
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as fh:
                 for line in fh:
@@ -2599,12 +2600,23 @@ class SessionManagerPage(QtWidgets.QWidget):
                     msg = "\n".join([p for p in text_parts if p]).strip()
                     if not msg:
                         continue
+                    if prev_role is not None and role != prev_role:
+                        lines.append(separator)
                     lines.append(f"[{role}]")
                     lines.append(msg)
                     lines.append("")
+                    prev_role = role
         except Exception as exc:
             lines.append(f"读取失败：{exc}")
-        self.detail_text.setPlainText("\n".join(lines).strip())
+        return "\n".join(lines).strip()
+
+    def _render_detail(self, meta: dict) -> None:
+        path = meta.get("path", "")
+        if not path:
+            return
+        only_ua = self.only_ua_check.isChecked()
+        content = self._build_rendered_text(meta, only_ua)
+        self.detail_text.setPlainText(content)
 
     def _show_session_menu(self, pos) -> None:
         item = self.list_widget.itemAt(pos)
@@ -2666,8 +2678,10 @@ class SessionManagerPage(QtWidgets.QWidget):
                     role = payload.get("role") or ""
                     if role in ("user", "assistant"):
                         items.append(data)
+            rendered_text = self._build_rendered_text(meta, only_ua)
+            payload = {"items": items, "rendered_text": rendered_text}
             with open(file_path, "w", encoding="utf-8") as out:
-                json.dump(items, out, ensure_ascii=False, indent=2)
+                json.dump(payload, out, ensure_ascii=False, indent=2)
         except Exception as exc:
             message_error(self, "失败", str(exc))
 
@@ -2676,11 +2690,15 @@ class SessionManagerPage(QtWidgets.QWidget):
         if not item:
             message_warn(self, "提示", "请先选择会话")
             return
+        meta = item.data(QtCore.Qt.UserRole)
+        if not isinstance(meta, dict):
+            return
         file_path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出 Markdown", "session.md", "Markdown (*.md)")
         if not file_path:
             return
         try:
-            content = self.detail_text.toPlainText()
+            only_ua = self.only_ua_check.isChecked()
+            content = self._build_rendered_text(meta, only_ua)
             with open(file_path, "w", encoding="utf-8") as out:
                 out.write(content)
         except Exception as exc:
