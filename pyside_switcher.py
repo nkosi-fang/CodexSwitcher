@@ -2327,8 +2327,9 @@ class SessionManagerPage(QtWidgets.QWidget):
         left_layout.addLayout(search_row)
 
         self.count_label = QtWidgets.QLabel("共 0 条")
+        self.count_label.setTextFormat(QtCore.Qt.RichText)
+        self.count_label.setWordWrap(True)
         left_layout.addWidget(self.count_label)
-
         self.list_widget = QtWidgets.QListWidget()
         self.list_widget.currentRowChanged.connect(self.on_select)
         self.list_widget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
@@ -2349,9 +2350,15 @@ class SessionManagerPage(QtWidgets.QWidget):
         option_row.addStretch(1)
         right_layout.addLayout(option_row)
 
+        self.only_ua_hint = QtWidgets.QLabel("不勾选：看“所有原始记录”，包括系统提示、开发者说明、工具响应等")
+        self.only_ua_hint.setWordWrap(True)
+        self.only_ua_hint.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Minimum)
+        self.only_ua_hint.setStyleSheet("color: #666;")
+        right_layout.addWidget(self.only_ua_hint)
+
         self.detail_text = QtWidgets.QPlainTextEdit()
         self.detail_text.setReadOnly(True)
-        self.detail_text.setMinimumHeight(200)
+        self.detail_text.setMinimumHeight(120)
         right_layout.addWidget(self.detail_text, 1)
 
         export_row = QtWidgets.QHBoxLayout()
@@ -2528,7 +2535,7 @@ class SessionManagerPage(QtWidgets.QWidget):
             row.setData(QtCore.Qt.UserRole, item)
             self.list_widget.addItem(row)
             shown += 1
-        self.count_label.setText(f"共 {shown} 条")
+        self.count_label.setText(f"共 {shown} 条<b>【ⓘ 提示：鼠标右键可打开文件夹】</b>")
         if shown == 0:
             self.detail_text.setPlainText("无匹配会话。")
 
