@@ -14,7 +14,7 @@ import ctypes
 import time
 from ctypes import wintypes
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 from urllib import request as urllib_request
 from urllib import error as urllib_error
@@ -57,6 +57,45 @@ from codex_switcher import (
 APP_TITLE = "Codex Switcher"
 APP_VERSION = "2.0.2"
 APP_REPO = "nkosi-fang/CodexSwitcher"
+
+CODING_COMPONENTS = [
+    "Codex",
+    "Responses",
+    "Chat Completions",
+    "Embeddings",
+    "Files",
+    "File uploads",
+    "Batch",
+    "Fine-tuning",
+    "Moderations",
+    "Realtime",
+    "Search",
+    "Agent",
+]
+
+CODING_COMPONENT_HINTS = {
+    "Codex": "Codex 服务本身，异常时 CLI 可能整体不可用",
+    "Responses": "主流生成/推理接口，影响代码生成请求",
+    "Chat Completions": "旧版聊天接口，部分配置仍依赖",
+    "Embeddings": "向量检索/代码库搜索能力",
+    "Files": "文件管理与引用",
+    "File uploads": "文件上传通道",
+    "Batch": "批处理异步任务",
+    "Fine-tuning": "微调训练",
+    "Moderations": "安全审核，异常可能导致请求阻塞",
+    "Realtime": "实时流式/低延迟交互",
+    "Search": "内置搜索/检索工具",
+    "Agent": "代理式编排（多步工具/任务）",
+}
+
+STATUS_TEXT = {
+    "operational": "正常",
+    "degraded_performance": "性能下降",
+    "partial_outage": "部分中断",
+    "major_outage": "严重故障",
+    "under_maintenance": "维护中",
+    "unknown": "未知",
+}
 
 
 def run_in_ui(fn) -> None:
@@ -198,6 +237,9 @@ def probe_endpoints(
 
     model_supported: Optional[bool] = None
     model_source = ""
+    model_in_list: Optional[bool] = None
+    response_model = ""
+    response_model_source = ""
 
     def parse_models(body: str) -> set[str]:
         try:
@@ -215,6 +257,17 @@ def probe_endpoints(
                             result.add(mid)
                 return result
         return set()
+
+    def extract_response_model(body: str) -> str:
+        try:
+            data = json.loads(body)
+        except Exception:
+            return ""
+        if isinstance(data, dict):
+            model_value = data.get("model")
+            if isinstance(model_value, str):
+                return model_value
+        return ""
 
     def is_model_error(body: str) -> bool:
         msg = str(body).lower()
@@ -302,14 +355,28 @@ def probe_endpoints(
     for _label, ep, _url, ok, body in results:
         if ok and ep in ("/responses", "/chat/completions", "/completions"):
             set_model_support(True, ep)
-        if ep == "/models" and ok:
+        if ep == "/models" and ok and model_in_list is None:
             models = parse_models(body)
             if models:
-                set_model_support(model in models, "/models")
+                model_in_list = model in models
+                set_model_support(model_in_list, "/models")
     if model_supported is None:
         for _label, ep, _url, ok, body in results:
             if (ok is False) and ep in ("/responses", "/chat/completions", "/completions") and is_model_error(body):
                 set_model_support(False, ep)
+
+    for _label, ep, _url, ok, body in results:
+        if ok and ep in ("/responses", "/chat/completions", "/completions"):
+            response_model = extract_response_model(body)
+            if response_model:
+                response_model_source = ep
+                break
+
+    in_list_text = "未知"
+    if model_in_list is True:
+        in_list_text = "是"
+    elif model_in_list is False:
+        in_list_text = "否"
 
     model_text = "可用" if model_supported is True else "不可用" if model_supported is False else "未知"
     model_hint = f"（来源: {model_source}）" if model_source else ""
@@ -348,10 +415,18 @@ def probe_endpoints(
         summary_lines.append("可用接口(URL)：")
         for url in supported_urls:
             summary_lines.append(f"- {url}")
+    summary_lines.append(f"模型列表包含（{model}）：{in_list_text}")
+    if response_model:
+        src_label = response_model_source or "未知"
+        summary_lines.append(f"实际返回 model：{response_model}（来源: {src_label}）")
     summary_detail = "\n".join(summary_lines)
 
     lines = list(summary_lines)
     lines.append(f"模型可用性（{model}）：{model_text}{model_hint}")
+    lines.append(f"模型列表包含（{model}）：{in_list_text}")
+    if response_model:
+        src_label = response_model_source or "未知"
+        lines.append(f"实际返回 model：{response_model}（来源: {src_label}）")
     lines.append(f"Embedding 测试模型：{embedding_model}")
     lines.append(f"Moderation 测试模型：{moderation_model}")
     lines.append("\n接口探测结果：")
@@ -374,6 +449,9 @@ def probe_endpoints(
         "supported_urls": supported_urls,
         "model_supported": model_supported,
         "model_source": model_source,
+        "model_in_list": model_in_list,
+        "response_model": response_model,
+        "response_model_source": response_model_source,
         "success_endpoint": success_endpoint,
         "results": results,
         "base_host": base_host,
@@ -586,6 +664,7 @@ class AccountPage(QtWidgets.QWidget):
         font = QtGui.QFont("Segoe UI", 12)
         font.setBold(True)
         return font
+
 
     def on_show(self) -> None:
         self.refresh()
@@ -842,7 +921,7 @@ class NetworkDiagnosticsPage(QtWidgets.QWidget):
         hint_label.setTextFormat(QtCore.Qt.RichText)
         hint_label.setText(
             '<ul style="margin:0 0 0 14px; padding:0; line-height:1.6;">'
-            '<li>本工具使用UA请求方式探测，但也有被中转站/WAF风控拦截的可能性，请检查日志文件 .codex\codex_switcher.log。</li>'
+            '<li>本工具使用UA请求方式探测，但也有被中转站/WAF风控拦截的可能性，请检查日志文件 .codex\\codex_switcher.log。</li>'
             '<li>可用模型主要是在oai推出新模型时，查看中转站账号池中能不能使用的目的。</li>'
             '<li>中转站账号池无号源时，理论上不影响中转站接口和模型探测。</li>'
             '</ul>'
@@ -878,6 +957,45 @@ class NetworkDiagnosticsPage(QtWidgets.QWidget):
         font.setBold(True)
         return font
 
+    def _start_marquee(self, label: QtWidgets.QLabel, base_text: str, key: str) -> None:
+        self._stop_marquee(key)
+        trail = ">>>>>>"
+        pad = 6
+        frames = []
+        for i in range(pad):
+            frames.append(f"{' ' * i}{trail}")
+        for i in range(pad - 2, -1, -1):
+            frames.append(f"{' ' * i}{trail}")
+        state = {"index": 0, "frames": frames, "base": base_text, "label": label, "style": label.styleSheet()}
+        timer = QtCore.QTimer(self)
+
+        def tick() -> None:
+            idx = state["index"]
+            state["index"] = idx + 1
+            frame = state["frames"][idx % len(state["frames"])]
+            label.setText(f"{base_text} {frame}")
+
+        timer.timeout.connect(tick)
+        timer.start(120)
+        label.setStyleSheet("color: #e53935; font-weight: 700; background-color: #fff3e0; padding: 2px 6px; border-radius: 4px;")
+        pool = getattr(self, "_marquee", None)
+        if pool is None:
+            pool = {}
+            self._marquee = pool
+        pool[key] = (timer, state)
+        tick()
+
+    def _stop_marquee(self, key: str) -> None:
+        pool = getattr(self, "_marquee", None)
+        if not pool or key not in pool:
+            return
+        timer, state = pool.pop(key)
+        timer.stop()
+        label = state.get("label")
+        prev_style = state.get("style")
+        if label is not None and prev_style is not None:
+            label.setStyleSheet(prev_style)
+
     def copy_supported_urls(self) -> None:
         urls = getattr(self, "_supported_urls", [])
         if not urls:
@@ -909,7 +1027,7 @@ class NetworkDiagnosticsPage(QtWidgets.QWidget):
             return
         retries = int(self.retries_spin.value())
         timeout = int(self.timeout_spin.value())
-        self.probe_status_label.setText("探测中...")
+        self._start_marquee(self.probe_status_label, "探测中", "_probe_marquee")
         self.table.setRowCount(0)
 
         org_id = ""
@@ -922,6 +1040,7 @@ class NetworkDiagnosticsPage(QtWidgets.QWidget):
 
         def apply_result(result: Dict[str, object], conclusion: str) -> None:
             self.append_result(result)
+            self._stop_marquee("_probe_marquee")
             if conclusion:
                 self.probe_status_label.setText(conclusion)
 
@@ -937,7 +1056,14 @@ class NetworkDiagnosticsPage(QtWidgets.QWidget):
                 ok_value = diag.get("model_supported")
                 endpoint = diag.get("model_source") or diag.get("success_endpoint") or ""
                 error = "" if ok_value is True else diag.get("conclusion", "")
-                result = {"model": model, "ok": ok_value, "endpoint": endpoint, "error": error}
+                result = {
+                    "model": model,
+                    "ok": ok_value,
+                    "endpoint": endpoint,
+                    "error": error,
+                    "response_model": diag.get("response_model", ""),
+                    "model_in_list": diag.get("model_in_list"),
+                }
                 last_result = (result, diag.get("conclusion", "完成"))
                 if ok_value is True or diag.get("success_endpoint"):
                     break
@@ -965,6 +1091,21 @@ class NetworkDiagnosticsPage(QtWidgets.QWidget):
             ok_text = "未知"
         if ok_value is True:
             return_value = result.get("endpoint")
+            response_model = result.get("response_model") or ""
+            model_in_list = result.get("model_in_list")
+            extras = []
+            if response_model:
+                extras.append(f"实际模型={response_model}")
+            if model_in_list is True:
+                extras.append("模型列表=是")
+            elif model_in_list is False:
+                extras.append("模型列表=否")
+            if extras:
+                extra_text = "，".join(extras)
+                if return_value:
+                    return_value = f"{return_value}（{extra_text}）"
+                else:
+                    return_value = f"（{extra_text}）"
         else:
             return_value = result.get("error") or ""
         values = [result.get("model"), ok_text, return_value]
@@ -989,7 +1130,7 @@ class NetworkDiagnosticsPage(QtWidgets.QWidget):
             return
 
         self.run_btn.setEnabled(False)
-        self.conclusion_label.setText("结论：诊断中...")
+        self._start_marquee(self.conclusion_label, "结论：诊断中", "_diag_marquee")
         self.detail_text.setPlainText("")
 
         def runner() -> None:
@@ -1004,7 +1145,15 @@ class NetworkDiagnosticsPage(QtWidgets.QWidget):
                     log_diagnosis("诊断失败", f"{conclusion}\n{detail}")
                 def done() -> None:
                     self.run_btn.setEnabled(True)
-                    self.conclusion_label.setText(conclusion)
+                    model_in_list = diagnosis.get("model_in_list")
+                    in_list_text = "未知"
+                    if model_in_list is True:
+                        in_list_text = "是"
+                    elif model_in_list is False:
+                        in_list_text = "否"
+                    conclusion_text = f"{conclusion} | 模型列表包含（{model}）：{in_list_text}"
+                    self._stop_marquee("_diag_marquee")
+                    self.conclusion_label.setText(conclusion_text)
                     self.detail_text.setPlainText(summary_detail)
                     self._supported_labels = supported
                     self._supported_urls = supported_urls
@@ -1015,6 +1164,7 @@ class NetworkDiagnosticsPage(QtWidgets.QWidget):
 
                 def done() -> None:
                     self.run_btn.setEnabled(True)
+                    self._stop_marquee("_diag_marquee")
                     self.conclusion_label.setText("结论：诊断失败")
                     message_error(self, "失败", str(exc))
 
@@ -2037,59 +2187,74 @@ class SettingsPage(QtWidgets.QWidget):
 
         threading.Thread(target=runner, daemon=True).start()
 
+    def _filter_release_sections(self, body: str) -> str:
+        wanted = {"标题", "平台", "变更"}
+        lines = body.splitlines()
+        out: list[str] = []
+        keep = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("##"):
+                heading = stripped.lstrip("#").strip()
+                normalized = heading.replace("：", ":").strip()
+                keep = False
+                for w in wanted:
+                    if normalized == w or normalized.startswith(f"{w}:") or normalized.startswith(f"{w} "):
+                        keep = True
+                        out.append(f"## {w}")
+                        break
+                continue
+            if keep:
+                out.append(line.rstrip())
+        cleaned: list[str] = []
+        blank = False
+        for line in out:
+            if not line.strip():
+                if not blank:
+                    cleaned.append("")
+                blank = True
+            else:
+                cleaned.append(line)
+                blank = False
+        while cleaned and not cleaned[0].strip():
+            cleaned.pop(0)
+        while cleaned and not cleaned[-1].strip():
+            cleaned.pop()
+        return "\n".join(cleaned).strip()
+
     def _get_release_notes(self, local_ver: str, latest_ver: str) -> str:
-        local_sem = self._extract_semver(local_ver) or local_ver
         latest_sem = self._extract_semver(latest_ver) or latest_ver
-        if not local_sem or not latest_sem:
-            return "无法解析版本号，无法生成更新内容。"
-        if local_sem == latest_sem:
-            return "已是最新版本，无需更新。"
-
-        def parts(ver: str):
-            try:
-                return tuple(int(p) for p in ver.split("."))
-            except Exception:
-                return ()
-
-        local_parts = parts(local_sem)
-        latest_parts = parts(latest_sem)
-        if not local_parts or not latest_parts:
+        if not latest_sem:
             return "无法解析版本号，无法生成更新内容。"
 
         api_url = f"https://api.github.com/repos/{APP_REPO}/releases?per_page=20"
         req = urllib_request.Request(api_url, headers={"User-Agent": "CodexSwitcher"})
         with urllib_request.urlopen(req, timeout=6) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-        if not isinstance(data, list):
+        if not isinstance(data, list) or not data:
             return "无法获取更新内容。"
 
-        lines = [f"本地版本：{local_sem}", f"最新版本：{latest_sem}", ""]
+        target = None
         for item in data:
             if not isinstance(item, dict):
                 continue
-            tag = item.get("tag_name") or item.get("name") or ""
-            ver = self._extract_semver(tag)
-            if not ver:
-                continue
-            ver_parts = parts(ver)
-            if not ver_parts or ver_parts <= local_parts:
-                continue
-            title = item.get("name") or tag
-            body = item.get("body") or ""
-            body_lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
-            body_preview = []
-            for ln in body_lines:
-                body_preview.append(f"  - {ln}")
-                if len(body_preview) >= 5:
-                    break
-            lines.append(f"[{ver}] {title}")
-            if body_preview:
-                lines.extend(body_preview)
-            lines.append("")
+            tag = item.get("tag_name") or ""
+            name = item.get("name") or ""
+            ver = self._extract_semver(tag) or self._extract_semver(name) or ""
+            if ver and ver == latest_sem:
+                target = item
+                break
+            if tag == latest_ver or name == latest_ver:
+                target = item
+                break
+        if target is None:
+            target = data[0]
 
-        if len(lines) <= 3:
-            return "未找到比本地版本更新的发布内容。"
-        return "\n".join(lines).strip()
+        body = target.get("body") or ""
+        filtered = self._filter_release_sections(body)
+        if not filtered:
+            return "未找到Release中的标题/平台/变更内容。"
+        return filtered
 
     def _get_latest_release(self) -> tuple[bool, str, str, str]:
         try:
@@ -2131,6 +2296,593 @@ class SettingsPage(QtWidgets.QWidget):
 
 
 
+
+class SessionManagerPage(QtWidgets.QWidget):
+    def __init__(self, state: AppState) -> None:
+        super().__init__()
+        self.state = state
+        self._sessions: list[dict] = []
+        self._history_index: dict[str, str] = {}
+        self._loaded_once = False
+
+        layout = QtWidgets.QVBoxLayout(self)
+        header = QtWidgets.QLabel("会话管理")
+        header.setFont(self._header_font())
+        layout.addWidget(header)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        layout.addWidget(splitter, 1)
+
+        # Left panel: search + list
+        left = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left)
+        search_row = QtWidgets.QHBoxLayout()
+        self.search_edit = QtWidgets.QLineEdit()
+        self.search_edit.setPlaceholderText("关键词过滤（history.jsonl）")
+        self.search_edit.textChanged.connect(self.apply_filter)
+        self.refresh_btn = QtWidgets.QPushButton("刷新索引")
+        self.refresh_btn.clicked.connect(self.refresh_index)
+        search_row.addWidget(self.search_edit, 1)
+        search_row.addWidget(self.refresh_btn)
+        left_layout.addLayout(search_row)
+
+        self.count_label = QtWidgets.QLabel("共 0 条")
+        left_layout.addWidget(self.count_label)
+
+        self.list_widget = QtWidgets.QListWidget()
+        self.list_widget.currentRowChanged.connect(self.on_select)
+        self.list_widget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(self._show_session_menu)
+        left_layout.addWidget(self.list_widget, 1)
+
+        splitter.addWidget(left)
+
+        # Right panel: details + export
+        right = QtWidgets.QWidget()
+        right_layout = QtWidgets.QVBoxLayout(right)
+
+        option_row = QtWidgets.QHBoxLayout()
+        self.only_ua_check = QtWidgets.QCheckBox("仅显示 user/assistant")
+        self.only_ua_check.setChecked(True)
+        self.only_ua_check.stateChanged.connect(self._reload_current_detail)
+        option_row.addWidget(self.only_ua_check)
+        option_row.addStretch(1)
+        right_layout.addLayout(option_row)
+
+        self.detail_text = QtWidgets.QPlainTextEdit()
+        self.detail_text.setReadOnly(True)
+        self.detail_text.setMinimumHeight(200)
+        right_layout.addWidget(self.detail_text, 1)
+
+        export_row = QtWidgets.QHBoxLayout()
+        self.export_json_btn = QtWidgets.QPushButton("导出 JSON")
+        self.export_json_btn.clicked.connect(self.export_json)
+        self.export_md_btn = QtWidgets.QPushButton("导出 Markdown")
+        self.export_md_btn.clicked.connect(self.export_markdown)
+        export_row.addWidget(self.export_json_btn)
+        export_row.addWidget(self.export_md_btn)
+        export_row.addStretch(1)
+        right_layout.addLayout(export_row)
+
+        splitter.addWidget(right)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+
+        # Cleanup group
+        cleanup_group = QtWidgets.QGroupBox("清理")
+        apply_white_shadow(cleanup_group)
+        cleanup_layout = QtWidgets.QHBoxLayout(cleanup_group)
+        self.clean_mode = QtWidgets.QComboBox()
+        self.clean_mode.addItems(["按日期（早于）", "按大小（大于）"])
+        self.clean_mode.currentIndexChanged.connect(self._update_clean_mode)
+        self.clean_date = QtWidgets.QDateEdit(QtCore.QDate.currentDate())
+        self.clean_date.setCalendarPopup(True)
+        self.clean_size = QtWidgets.QSpinBox()
+        self.clean_size.setRange(1, 10240)
+        self.clean_size.setValue(100)
+        self.clean_size.setSuffix(" MB")
+        self.clean_history = QtWidgets.QCheckBox("同时清理 history.jsonl")
+        self.clean_history.setChecked(True)
+        self.clean_btn = QtWidgets.QPushButton("执行清理")
+        self.clean_btn.clicked.connect(self.run_cleanup)
+        cleanup_layout.addWidget(self.clean_mode)
+        cleanup_layout.addWidget(self.clean_date)
+        cleanup_layout.addWidget(self.clean_size)
+        cleanup_layout.addWidget(self.clean_history)
+        cleanup_layout.addWidget(self.clean_btn)
+        layout.addWidget(cleanup_group)
+
+        self._update_clean_mode()
+
+    def _header_font(self) -> QtGui.QFont:
+        font = QtGui.QFont("Segoe UI", 12)
+        font.setBold(True)
+        return font
+
+    def on_show(self) -> None:
+        if not self._loaded_once:
+            self._loaded_once = True
+            self.refresh_index()
+
+    def _update_clean_mode(self) -> None:
+        mode = self.clean_mode.currentIndex()
+        self.clean_date.setVisible(mode == 0)
+        self.clean_size.setVisible(mode == 1)
+
+    def refresh_index(self) -> None:
+        self.refresh_btn.setEnabled(False)
+        self.list_widget.clear()
+        self.detail_text.setPlainText("正在加载会话索引...")
+
+        def runner() -> None:
+            sessions = self._load_sessions()
+            history = self._load_history_index()
+
+            def done() -> None:
+                self._sessions = sessions
+                self._history_index = history
+                self.refresh_btn.setEnabled(True)
+                self.apply_filter()
+
+            run_in_ui(done)
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _load_sessions(self) -> list[dict]:
+        base = Path.home() / ".codex" / "sessions"
+        if not base.exists():
+            return []
+        items = []
+        for path in base.rglob("*.jsonl"):
+            meta = self._read_session_meta(path)
+            if not meta:
+                continue
+            meta["path"] = str(path)
+            meta["size"] = path.stat().st_size
+            meta["mtime"] = path.stat().st_mtime
+            items.append(meta)
+        items.sort(key=lambda x: x.get("ts_epoch", 0), reverse=True)
+        return items
+
+    def _read_session_meta(self, path: Path) -> Optional[dict]:
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as fh:
+                for _ in range(50):
+                    line = fh.readline()
+                    if not line:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    if data.get("type") != "session_meta":
+                        continue
+                    payload = data.get("payload") or {}
+                    sid = payload.get("id", "")
+                    ts = payload.get("timestamp", "")
+                    cwd = payload.get("cwd", "")
+                    model = payload.get("model_provider", "")
+                    git = payload.get("git") or {}
+                    branch = git.get("branch", "") if isinstance(git, dict) else ""
+                    display_time, epoch = self._format_time(ts)
+                    return {
+                        "id": sid,
+                        "timestamp": ts,
+                        "ts_epoch": epoch,
+                        "time_display": display_time,
+                        "cwd": cwd,
+                        "model": model,
+                        "branch": branch,
+                    }
+        except Exception:
+            return None
+        return None
+
+    def _format_time(self, ts: str) -> tuple[str, float]:
+        if not ts:
+            return ("-", 0.0)
+        try:
+            ts_norm = ts.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(ts_norm)
+            local = dt.astimezone()
+            return (local.strftime("%Y-%m-%d %H:%M:%S"), local.timestamp())
+        except Exception:
+            return (ts, 0.0)
+
+    def _load_history_index(self) -> dict[str, str]:
+        history = Path.home() / ".codex" / "history.jsonl"
+        if not history.exists():
+            return {}
+        index: dict[str, str] = {}
+        try:
+            with history.open("r", encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    sid = data.get("session_id") or ""
+                    text = data.get("text") or ""
+                    if not sid:
+                        continue
+                    prev = index.get(sid, "")
+                    if len(prev) < 2000:
+                        merged = (prev + "\n" + text).strip()
+                        index[sid] = merged[:2000].lower()
+        except Exception:
+            return index
+        return index
+
+    def apply_filter(self) -> None:
+        keyword = self.search_edit.text().strip().lower()
+        self.list_widget.clear()
+        shown = 0
+        for item in self._sessions:
+            sid = item.get("id", "")
+            if keyword:
+                text = self._history_index.get(sid, "")
+                if keyword not in text:
+                    continue
+            display = f"{item.get('time_display', '-')} | {item.get('model', '-') or '-'} | {item.get('branch', '-') or '-'} | {item.get('cwd', '-') or '-'}"
+            row = QtWidgets.QListWidgetItem(display)
+            row.setData(QtCore.Qt.UserRole, item)
+            self.list_widget.addItem(row)
+            shown += 1
+        self.count_label.setText(f"共 {shown} 条")
+        if shown == 0:
+            self.detail_text.setPlainText("无匹配会话。")
+
+    def on_select(self, index: int) -> None:
+        if index < 0:
+            return
+        item = self.list_widget.item(index)
+        if not item:
+            return
+        data = item.data(QtCore.Qt.UserRole)
+        if not isinstance(data, dict):
+            return
+        self._render_detail(data)
+
+    def _reload_current_detail(self) -> None:
+        item = self.list_widget.currentItem()
+        if not item:
+            return
+        data = item.data(QtCore.Qt.UserRole)
+        if isinstance(data, dict):
+            self._render_detail(data)
+
+    def _render_detail(self, meta: dict) -> None:
+        path = meta.get("path", "")
+        if not path:
+            return
+        only_ua = self.only_ua_check.isChecked()
+        lines = []
+        lines.append(f"时间：{meta.get('time_display', '-')}")
+        lines.append(f"模型：{meta.get('model', '-')}")
+        lines.append(f"分支：{meta.get('branch', '-')}")
+        lines.append(f"目录：{meta.get('cwd', '-')}")
+        lines.append(f"文件：{path}")
+        lines.append("")
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    if data.get("type") != "response_item":
+                        continue
+                    payload = data.get("payload") or {}
+                    if payload.get("type") != "message":
+                        continue
+                    role = payload.get("role") or ""
+                    if only_ua and role not in ("user", "assistant"):
+                        continue
+                    contents = payload.get("content") or []
+                    text_parts = []
+                    if isinstance(contents, list):
+                        for c in contents:
+                            if not isinstance(c, dict):
+                                continue
+                            ctype = c.get("type")
+                            if ctype in ("input_text", "output_text", "text"):
+                                text_parts.append(c.get("text", ""))
+                            elif ctype and "image" in ctype:
+                                text_parts.append("[image]")
+                    msg = "\n".join([p for p in text_parts if p]).strip()
+                    if not msg:
+                        continue
+                    lines.append(f"[{role}]")
+                    lines.append(msg)
+                    lines.append("")
+        except Exception as exc:
+            lines.append(f"读取失败：{exc}")
+        self.detail_text.setPlainText("\n".join(lines).strip())
+
+    def _show_session_menu(self, pos) -> None:
+        item = self.list_widget.itemAt(pos)
+        if not item:
+            return
+        menu = QtWidgets.QMenu(self)
+        open_folder = menu.addAction("打开文件夹")
+        action = menu.exec(self.list_widget.mapToGlobal(pos))
+        if action == open_folder:
+            self._open_session_folder(item)
+
+    def _open_session_folder(self, item: QtWidgets.QListWidgetItem) -> None:
+        meta = item.data(QtCore.Qt.UserRole)
+        if not isinstance(meta, dict):
+            return
+        path = meta.get("path", "")
+        if not path:
+            return
+        folder = os.path.dirname(path)
+        if not folder:
+            return
+        try:
+            os.startfile(folder)
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+
+    def export_json(self) -> None:
+        item = self.list_widget.currentItem()
+        if not item:
+            message_warn(self, "提示", "请先选择会话")
+            return
+        meta = item.data(QtCore.Qt.UserRole)
+        if not isinstance(meta, dict):
+            return
+        path = meta.get("path", "")
+        if not path:
+            return
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出 JSON", "session.json", "JSON (*.json)")
+        if not file_path:
+            return
+        only_ua = self.only_ua_check.isChecked()
+        items = []
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    if not only_ua:
+                        items.append(data)
+                        continue
+                    if data.get("type") == "session_meta":
+                        items.append(data)
+                        continue
+                    if data.get("type") != "response_item":
+                        continue
+                    payload = data.get("payload") or {}
+                    role = payload.get("role") or ""
+                    if role in ("user", "assistant"):
+                        items.append(data)
+            with open(file_path, "w", encoding="utf-8") as out:
+                json.dump(items, out, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+
+    def export_markdown(self) -> None:
+        item = self.list_widget.currentItem()
+        if not item:
+            message_warn(self, "提示", "请先选择会话")
+            return
+        file_path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "导出 Markdown", "session.md", "Markdown (*.md)")
+        if not file_path:
+            return
+        try:
+            content = self.detail_text.toPlainText()
+            with open(file_path, "w", encoding="utf-8") as out:
+                out.write(content)
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+
+    def run_cleanup(self) -> None:
+        mode = self.clean_mode.currentIndex()
+        if not self._sessions:
+            message_warn(self, "提示", "暂无可清理的会话")
+            return
+        targets = []
+        if mode == 0:
+            date = self.clean_date.date().toPython()
+            cutoff = datetime.combine(date, datetime.min.time()).timestamp()
+            for item in self._sessions:
+                ts = item.get("ts_epoch", 0) or item.get("mtime", 0)
+                if ts and ts < cutoff:
+                    targets.append(item)
+        else:
+            size_mb = self.clean_size.value()
+            limit = size_mb * 1024 * 1024
+            for item in self._sessions:
+                if item.get("size", 0) >= limit:
+                    targets.append(item)
+        if not targets:
+            message_info(self, "提示", "没有匹配的会话文件")
+            return
+        total_mb = sum(i.get("size", 0) for i in targets) / (1024 * 1024)
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "确认清理",
+            f"将删除 {len(targets)} 个会话文件，约 {total_mb:.1f} MB。是否继续？",
+        )
+        if reply != QtWidgets.QMessageBox.Yes:
+            return
+        deleted_ids = set()
+        for item in targets:
+            fpath = item.get("path", "")
+            sid = item.get("id", "")
+            if not fpath:
+                continue
+            try:
+                Path(fpath).unlink(missing_ok=True)
+                if sid:
+                    deleted_ids.add(sid)
+            except Exception:
+                continue
+        if self.clean_history.isChecked() and deleted_ids:
+            self._cleanup_history(deleted_ids)
+        self.refresh_index()
+
+    def _cleanup_history(self, deleted_ids: set[str]) -> None:
+        history = Path.home() / ".codex" / "history.jsonl"
+        if not history.exists():
+            return
+        tmp = history.with_suffix(".jsonl.tmp")
+        try:
+            with history.open("r", encoding="utf-8", errors="ignore") as fh, tmp.open("w", encoding="utf-8") as out:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    sid = data.get("session_id") or ""
+                    if sid in deleted_ids:
+                        continue
+                    out.write(json.dumps(data, ensure_ascii=False) + "\n")
+            tmp.replace(history)
+        except Exception:
+            return
+
+
+class OpenAIStatusPage(QtWidgets.QWidget):
+    def __init__(self, state: AppState) -> None:
+        super().__init__()
+        self.state = state
+
+        layout = QtWidgets.QVBoxLayout(self)
+        header = QtWidgets.QLabel("OpenAI 状态")
+        header.setFont(self._header_font())
+        layout.addWidget(header)
+
+        status_group = QtWidgets.QGroupBox("Codex/编程相关")
+        apply_white_shadow(status_group)
+        status_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        status_layout = QtWidgets.QVBoxLayout(status_group)
+        self.status_text = QtWidgets.QPlainTextEdit()
+        self.status_text.setReadOnly(True)
+        self.status_text.setMinimumHeight(200)
+        self.status_text.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        self.status_text.setPlainText("尚未获取状态。")
+        status_layout.addWidget(self.status_text)
+        layout.addWidget(status_group, 1)
+
+        action_row = QtWidgets.QHBoxLayout()
+        self.refresh_status_btn = QtWidgets.QPushButton("刷新状态")
+        self.refresh_status_btn.setMinimumWidth(110)
+        self.refresh_status_btn.setStyleSheet("padding: 4px 10px;")
+        self.refresh_status_btn.clicked.connect(self.refresh_status)
+        self.open_status_btn = QtWidgets.QPushButton("打开status.openai.com页")
+        self.open_status_btn.setMinimumWidth(220)
+        self.open_status_btn.setStyleSheet("padding: 4px 10px;")
+        self.open_status_btn.clicked.connect(self.open_status_page)
+        action_row.addWidget(self.refresh_status_btn)
+        action_row.addWidget(self.open_status_btn)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
+
+        self._status_url = "https://status.openai.com"
+        self._status_checked = False
+
+    def _header_font(self) -> QtGui.QFont:
+        font = QtGui.QFont("Segoe UI", 12)
+        font.setBold(True)
+        return font
+
+    def on_show(self) -> None:
+        if not self._status_checked:
+            self._status_checked = True
+            self.refresh_status(auto=True)
+
+    def open_status_page(self) -> None:
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl(self._status_url))
+
+    def refresh_status(self, auto: bool = False) -> None:
+        self.refresh_status_btn.setEnabled(False)
+        self.status_text.setPlainText("正在获取 OpenAI 状态...")
+
+        def runner() -> None:
+            try:
+                content = self._get_status_summary()
+                err = ""
+            except Exception as exc:
+                content = ""
+                err = str(exc)
+
+            def done() -> None:
+                self.refresh_status_btn.setEnabled(True)
+                if content:
+                    self.status_text.setPlainText(content)
+                else:
+                    self.status_text.setPlainText(f"无法获取状态：{err}")
+
+            run_in_ui(done)
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _get_status_summary(self) -> str:
+        api_url = "https://status.openai.com/api/v2/summary.json"
+        req = urllib_request.Request(api_url, headers={"User-Agent": "CodexSwitcher"})
+        with urllib_request.urlopen(req, timeout=6) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if not isinstance(data, dict):
+            return "无法解析状态数据。"
+
+        comp_map = {}
+        for comp in data.get("components", []) or []:
+            if isinstance(comp, dict):
+                name = comp.get("name")
+                if isinstance(name, str):
+                    comp_map[name] = comp
+
+        status = data.get("status") or {}
+        page = data.get("page") or {}
+        updated_at = page.get("updated_at") or status.get("updated_at") or ""
+        indicator = status.get("indicator") or "-"
+        desc = status.get("description") or "-"
+
+        lines = [f"总体状态：{desc} ({indicator})"]
+        if updated_at:
+            lines.append(f"更新时间：{updated_at}")
+            try:
+                ts = updated_at.replace("Z", "+00:00")
+                dt = datetime.fromisoformat(ts)
+                bj = dt.astimezone(timezone(timedelta(hours=8)))
+                lines.append(f"北京时间：{bj.strftime('%Y-%m-%d %H:%M:%S')}")
+            except Exception:
+                pass
+        lines.append("")
+
+        abnormal: list[str] = []
+        normal: list[str] = []
+        for name in CODING_COMPONENTS:
+            comp = comp_map.get(name)
+            hint = CODING_COMPONENT_HINTS.get(name, "")
+            if comp:
+                raw_status = comp.get("status", "unknown")
+                status_text = STATUS_TEXT.get(raw_status, raw_status)
+                line = f"- [{status_text}] {name}"
+            else:
+                raw_status = "unknown"
+                line = f"- [未知] {name}"
+            if hint:
+                line += f"：{hint}"
+            if raw_status == "operational":
+                normal.append(line)
+            else:
+                abnormal.append(line)
+
+        if abnormal:
+            lines.append("异常/需关注：")
+            lines.extend(abnormal)
+            lines.append("")
+        lines.append("组件状态：")
+        lines.extend(normal)
+
+        return "\n".join(lines).strip()
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -2163,6 +2915,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pages["network"] = NetworkDiagnosticsPage(self.state)
         self.pages["codex_status"] = CodexStatusPage(self.state)
         self.pages["settings"] = SettingsPage(self.state)
+        self.pages["openai_status"] = OpenAIStatusPage(self.state)
+        self.pages["sessions"] = SessionManagerPage(self.state)
 
         for page in self.pages.values():
             self.stack.addWidget(page)
@@ -2172,7 +2926,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._add_nav_button(nav, "config.toml配置", "config_toml")
         self._add_nav_button(nav, "opencode 配置", "opencode")
         self._add_nav_button(nav, "多账号切换", "account")
+        self._add_nav_button(nav, "会话管理", "sessions")
         self._add_nav_button(nav, "中转站接口", "network")
+        self._add_nav_button(nav, "OpenAI 状态", "openai_status")
         self._add_nav_button(nav, "检查更新", "settings")
         nav.addStretch(1)
 

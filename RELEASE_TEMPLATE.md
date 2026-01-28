@@ -21,5 +21,5 @@ v2.0.2 (Windows)
 
 ## 已知问题
 
-- （如无，写“无”）
+- codex cli最新版本0.92可能会出现沙盒相关警告，请自行手动在config.toml中添加“suppress_unstable_features_warning = true”。添加位置如截图：
 
