@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 import json
+import base64
 import os
 import subprocess
 import re
@@ -12,6 +13,7 @@ import shutil
 import threading
 import ctypes
 import time
+import html
 from ctypes import wintypes
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -515,6 +517,10 @@ class AccountPage(QtWidgets.QWidget):
         list_title = QtWidgets.QLabel("账号列表")
         list_layout.addWidget(list_title)
         self.list_widget = QtWidgets.QListWidget()
+        self.list_widget.setMinimumWidth(0)
+        self.list_widget.setMinimumHeight(200)
+        self.list_widget.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustIgnored)
+        self.list_widget.setTextElideMode(QtCore.Qt.ElideRight)
         self.list_widget.currentRowChanged.connect(self.on_select)
         list_layout.addWidget(self.list_widget)
         list_layout.addStretch(1)
@@ -2304,42 +2310,114 @@ class SessionManagerPage(QtWidgets.QWidget):
         self._sessions: list[dict] = []
         self._history_index: dict[str, str] = {}
         self._loaded_once = False
+        self._search_cancel = threading.Event()
+        self._active_search_id = 0
 
         layout = QtWidgets.QVBoxLayout(self)
-        header = QtWidgets.QLabel("会话管理")
+        header = QtWidgets.QLabel("Codex会话管理")
         header.setFont(self._header_font())
         layout.addWidget(header)
 
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        layout.addWidget(splitter, 1)
+        content = QtWidgets.QWidget()
+        self._session_content = content
+        content_layout = QtWidgets.QHBoxLayout(content)
+        self._session_split_layout = content_layout
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(content, 1)
 
         # Left panel: search + list
         left = QtWidgets.QWidget()
+        self._session_left = left
+        left.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        left.setMinimumWidth(0)
         left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(8)
         search_row = QtWidgets.QHBoxLayout()
         self.search_edit = QtWidgets.QLineEdit()
-        self.search_edit.setPlaceholderText("关键词过滤（history.jsonl）")
+        self.search_edit.setFixedHeight(24)
+        self.search_edit.setPlaceholderText("关键词过滤（history 优先，必要时深度搜索）")
         self.search_edit.textChanged.connect(self.apply_filter)
         self.refresh_btn = QtWidgets.QPushButton("刷新索引")
+        self.refresh_btn.setFixedHeight(24)
         self.refresh_btn.clicked.connect(self.refresh_index)
         search_row.addWidget(self.search_edit, 1)
         search_row.addWidget(self.refresh_btn)
         left_layout.addLayout(search_row)
 
+        search_option_row = QtWidgets.QHBoxLayout()
+        search_option_row.addWidget(QtWidgets.QLabel("模式"))
+        self.search_mode = QtWidgets.QComboBox()
+        self.search_mode.addItems(["OR（任一命中）", "AND（全部命中）"])
+        self.search_mode.currentIndexChanged.connect(self.apply_filter)
+        search_option_row.addWidget(self.search_mode)
+        search_option_row.addSpacing(6)
+        search_option_row.addWidget(QtWidgets.QLabel("最多扫描"))
+        self.scan_limit = QtWidgets.QSpinBox()
+        self.scan_limit.setRange(1, 10000)
+        self.scan_limit.setValue(200)
+        self.scan_limit.setSuffix(" 条")
+        self.scan_limit.valueChanged.connect(self.apply_filter)
+        search_option_row.addWidget(self.scan_limit)
+        search_option_row.addSpacing(6)
+        search_option_row.addWidget(QtWidgets.QLabel("最近"))
+        self.scan_days = QtWidgets.QSpinBox()
+        self.scan_days.setRange(1, 3650)
+        self.scan_days.setValue(90)
+        self.scan_days.setSuffix(" 天")
+        self.scan_days.valueChanged.connect(self.apply_filter)
+        search_option_row.addWidget(self.scan_days)
+        search_option_row.addStretch(1)
+        left_layout.addLayout(search_option_row)
+
+        self.search_hint = QtWidgets.QLabel("高级语法：空格分词；模式选 AND/OR；包含“|”强制 OR")
+        self.search_hint.setWordWrap(True)
+        self.search_hint.setStyleSheet("color: #666;")
+        left_layout.addWidget(self.search_hint)
+
+        left_layout.addSpacing(20)
+
         self.count_label = QtWidgets.QLabel("共 0 条")
         self.count_label.setTextFormat(QtCore.Qt.RichText)
         self.count_label.setWordWrap(True)
         left_layout.addWidget(self.count_label)
+
+        self.search_status = QtWidgets.QLabel("")
+        self.search_status.setWordWrap(True)
+        self.search_status.setStyleSheet("color: #666;")
+        left_layout.addWidget(self.search_status)
+
+        progress_row = QtWidgets.QHBoxLayout()
+        self.search_progress = QtWidgets.QProgressBar()
+        self.search_progress.setFixedHeight(16)
+        self.search_progress.setTextVisible(True)
+        self.search_progress.setFormat("%v/%m")
+        self.search_progress.setVisible(False)
+        self.search_cancel_btn = QtWidgets.QPushButton("取消搜索")
+        self.search_cancel_btn.setFixedHeight(22)
+        self.search_cancel_btn.setVisible(False)
+        self.search_cancel_btn.clicked.connect(self.cancel_search)
+        progress_row.addWidget(self.search_progress, 1)
+        progress_row.addWidget(self.search_cancel_btn)
+        left_layout.addLayout(progress_row)
+
         self.list_widget = QtWidgets.QListWidget()
+        self.list_widget.setMinimumWidth(0)
+        self.list_widget.setMinimumHeight(200)
+        self.list_widget.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustIgnored)
+        self.list_widget.setTextElideMode(QtCore.Qt.ElideRight)
         self.list_widget.currentRowChanged.connect(self.on_select)
         self.list_widget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.list_widget.customContextMenuRequested.connect(self._show_session_menu)
         left_layout.addWidget(self.list_widget, 1)
 
-        splitter.addWidget(left)
+        content_layout.addWidget(left, 0)
 
         # Right panel: details + export
         right = QtWidgets.QWidget()
+        self._session_right = right
+        right.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        right.setMinimumWidth(0)
         right_layout = QtWidgets.QVBoxLayout(right)
 
         option_row = QtWidgets.QHBoxLayout()
@@ -2371,9 +2449,8 @@ class SessionManagerPage(QtWidgets.QWidget):
         export_row.addStretch(1)
         right_layout.addLayout(export_row)
 
-        splitter.addWidget(right)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 2)
+        content_layout.addWidget(right, 0)
+        self._update_session_split()
 
         # Cleanup group
         cleanup_group = QtWidgets.QGroupBox("清理")
@@ -2405,6 +2482,39 @@ class SessionManagerPage(QtWidgets.QWidget):
         font = QtGui.QFont("Segoe UI", 12)
         font.setBold(True)
         return font
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._update_session_split()
+
+    def _update_session_split(self) -> None:
+        if not hasattr(self, "_session_split_guard"):
+            self._session_split_guard = False
+        if self._session_split_guard:
+            return
+        if not hasattr(self, "_session_split_layout"):
+            return
+        left = getattr(self, "_session_left", None)
+        right = getattr(self, "_session_right", None)
+        content = getattr(self, "_session_content", None)
+        if left is None or right is None or content is None:
+            return
+        total = content.width()
+        margins = self._session_split_layout.contentsMargins()
+        spacing = self._session_split_layout.spacing()
+        available = total - margins.left() - margins.right() - spacing
+        if available <= 0:
+            return
+        left_w = int(available * 0.5)
+        right_w = max(available - left_w, 0)
+        self._session_split_guard = True
+        try:
+            left.setMinimumWidth(left_w)
+            left.setMaximumWidth(left_w)
+            right.setMinimumWidth(right_w)
+            right.setMaximumWidth(right_w)
+        finally:
+            self._session_split_guard = False
 
     def on_show(self) -> None:
         if not self._loaded_once:
@@ -2520,24 +2630,192 @@ class SessionManagerPage(QtWidgets.QWidget):
             return index
         return index
 
-    def apply_filter(self) -> None:
-        keyword = self.search_edit.text().strip().lower()
+    def _parse_keywords(self, raw: str) -> tuple[list[str], str]:
+        raw = raw.strip().lower()
+        if not raw:
+            return [], "OR"
+        force_or = "|" in raw
+        terms = [t for t in re.split(r"[\s|]+", raw) if t]
+        mode = "AND" if self.search_mode.currentIndex() == 1 else "OR"
+        if force_or:
+            mode = "OR"
+        return terms, mode
+
+    def _match_text(self, text: str, terms: list[str], mode: str) -> bool:
+        if not terms:
+            return True
+        if not text:
+            return False
+        if mode == "AND":
+            return all(t in text for t in terms)
+        return any(t in text for t in terms)
+
+    def _apply_list(self, items: list[dict], show_empty: bool = True) -> None:
         self.list_widget.clear()
         shown = 0
-        for item in self._sessions:
-            sid = item.get("id", "")
-            if keyword:
-                text = self._history_index.get(sid, "")
-                if keyword not in text:
-                    continue
+        for item in items:
             display = f"{item.get('time_display', '-')} | {item.get('model', '-') or '-'} | {item.get('branch', '-') or '-'} | {item.get('cwd', '-') or '-'}"
             row = QtWidgets.QListWidgetItem(display)
             row.setData(QtCore.Qt.UserRole, item)
             self.list_widget.addItem(row)
             shown += 1
-        self.count_label.setText(f"共 {shown} 条<b>【ⓘ 提示：鼠标右键可打开文件夹】</b>")
-        if shown == 0:
+        self.count_label.setText(f"共 {shown} 条<b>【ⓘ 提示：鼠标右键可打开文件夹或继续该会话（Codex CLI）】</b>")
+        if shown == 0 and show_empty:
             self.detail_text.setPlainText("无匹配会话。")
+
+    def _show_search_progress(self, total: int) -> None:
+        self.search_progress.setMaximum(max(total, 1))
+        self.search_progress.setValue(0)
+        self.search_progress.setVisible(True)
+        self.search_cancel_btn.setEnabled(True)
+        self.search_cancel_btn.setVisible(True)
+
+    def _update_search_progress(self, value: int, total: int, search_id: int) -> None:
+        if search_id != self._active_search_id:
+            return
+        self.search_progress.setMaximum(max(total, 1))
+        self.search_progress.setValue(value)
+        self.search_status.setText(f"深度搜索中 {value}/{total}（可能耗时）")
+
+    def _hide_search_progress(self) -> None:
+        self.search_progress.setVisible(False)
+        self.search_cancel_btn.setVisible(False)
+
+    def cancel_search(self) -> None:
+        if self.search_progress.isVisible():
+            self._search_cancel.set()
+            self.search_cancel_btn.setEnabled(False)
+            self.search_status.setText("正在取消搜索...")
+
+    def _select_deep_candidates(self) -> list[dict]:
+        max_count = self.scan_limit.value()
+        days = self.scan_days.value()
+        cutoff = time.time() - days * 86400
+        candidates = []
+        for item in self._sessions:
+            ts = item.get("ts_epoch", 0) or item.get("mtime", 0)
+            if ts and ts < cutoff:
+                continue
+            candidates.append(item)
+            if len(candidates) >= max_count:
+                break
+        return candidates
+
+    def _session_contains_terms(self, path: str, terms: list[str], mode: str) -> bool:
+        found = set()
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    if data.get("type") != "response_item":
+                        continue
+                    payload = data.get("payload") or {}
+                    if payload.get("type") != "message":
+                        continue
+                    contents = payload.get("content") or []
+                    text_parts = []
+                    if isinstance(contents, list):
+                        for c in contents:
+                            if not isinstance(c, dict):
+                                continue
+                            ctype = c.get("type")
+                            if ctype in ("input_text", "output_text", "text"):
+                                text_parts.append(c.get("text", ""))
+                            elif ctype and "image" in ctype:
+                                text_parts.append("[image]")
+                    msg = "\n".join([p for p in text_parts if p]).strip().lower()
+                    if not msg:
+                        continue
+                    if mode == "OR":
+                        if any(t in msg for t in terms):
+                            return True
+                    else:
+                        for term in terms:
+                            if term in msg:
+                                found.add(term)
+                        if len(found) == len(terms):
+                            return True
+        except Exception:
+            return False
+        return False
+
+    def _start_deep_search(self, terms: list[str], mode: str, search_id: int) -> None:
+        candidates = self._select_deep_candidates()
+        if not candidates:
+            self._hide_search_progress()
+            self.search_status.setText("深度搜索范围为空。")
+            self.detail_text.setPlainText("无匹配会话。")
+            return
+        total = len(candidates)
+        self._search_cancel.clear()
+        self._show_search_progress(total)
+        self.search_status.setText(f"history 无匹配，开始深度搜索（可能耗时），范围 {total} 条...")
+
+        def runner() -> None:
+            matches = []
+            for idx, item in enumerate(candidates, 1):
+                if self._search_cancel.is_set() or search_id != self._active_search_id:
+                    break
+                path = item.get("path", "")
+                if path and self._session_contains_terms(path, terms, mode):
+                    matches.append(item)
+                if idx == total or idx % 3 == 0:
+                    run_in_ui(lambda i=idx, t=total, sid=search_id: self._update_search_progress(i, t, sid))
+            canceled = self._search_cancel.is_set() or search_id != self._active_search_id
+
+            def done() -> None:
+                if search_id != self._active_search_id:
+                    return
+                self._hide_search_progress()
+                if canceled:
+                    if matches:
+                        self.search_status.setText(f"搜索已取消（已命中 {len(matches)} 条）。")
+                        self._apply_list(matches)
+                    else:
+                        self.search_status.setText("搜索已取消。")
+                        self._apply_list([], show_empty=True)
+                else:
+                    if matches:
+                        self.search_status.setText(f"深度搜索完成：命中 {len(matches)} 条。")
+                        self._apply_list(matches)
+                    else:
+                        self.search_status.setText("深度搜索完成：无匹配。")
+                        self._apply_list([], show_empty=True)
+
+            run_in_ui(done)
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def apply_filter(self) -> None:
+        raw = self.search_edit.text()
+        terms, mode = self._parse_keywords(raw)
+        self._search_cancel.set()
+        self._active_search_id += 1
+        current_id = self._active_search_id
+
+        if not terms:
+            self.search_status.setText("")
+            self._hide_search_progress()
+            self._apply_list(self._sessions)
+            return
+
+        matched = []
+        for item in self._sessions:
+            sid = item.get("id", "")
+            text = self._history_index.get(sid, "")
+            if self._match_text(text, terms, mode):
+                matched.append(item)
+        if matched:
+            self.search_status.setText(f"history 命中 {len(matched)} 条。")
+            self._hide_search_progress()
+            self._apply_list(matched)
+            return
+
+        self._apply_list([], show_empty=False)
+        self._start_deep_search(terms, mode, current_id)
 
     def on_select(self, index: int) -> None:
         if index < 0:
@@ -2624,9 +2902,12 @@ class SessionManagerPage(QtWidgets.QWidget):
             return
         menu = QtWidgets.QMenu(self)
         open_folder = menu.addAction("打开文件夹")
+        resume_session = menu.addAction("继续该会话（Codex CLI）")
         action = menu.exec(self.list_widget.mapToGlobal(pos))
         if action == open_folder:
             self._open_session_folder(item)
+        elif action == resume_session:
+            self._resume_session(item)
 
     def _open_session_folder(self, item: QtWidgets.QListWidgetItem) -> None:
         meta = item.data(QtCore.Qt.UserRole)
@@ -2640,6 +2921,53 @@ class SessionManagerPage(QtWidgets.QWidget):
             return
         try:
             os.startfile(folder)
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+
+    def _resume_session(self, item: QtWidgets.QListWidgetItem) -> None:
+        meta = item.data(QtCore.Qt.UserRole)
+        if not isinstance(meta, dict):
+            return
+        sid = meta.get("id", "")
+        if not sid:
+            message_warn(self, "提示", "未找到会话 ID，无法继续")
+            return
+        cwd = meta.get("cwd", "")
+        if cwd and not os.path.isdir(cwd):
+            cwd = ""
+        exe = find_codex_exe()
+        if not exe:
+            message_warn(self, "提示", "未检测到 codex 命令，请先安装")
+            return
+        args = ["resume", sid]
+        if cwd:
+            args += ["--cd", cwd]
+        env = os.environ.copy()
+        run_cwd = cwd or None
+        try:
+            exe_lower = exe.lower()
+            if os.name == "nt":
+                creationflags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0x00000010)
+
+                def _ps_quote(value: str) -> str:
+                    return "'" + value.replace("'", "''") + "'"
+
+                ps_args = " ".join(_ps_quote(a) for a in args)
+                ps_cmd = f"& {_ps_quote(exe)} {ps_args}"
+                if cwd:
+                    ps_cmd = f"Set-Location -LiteralPath {_ps_quote(cwd)}; {ps_cmd}"
+                ps_encoded = base64.b64encode(ps_cmd.encode("utf-16le")).decode("ascii")
+
+                wt = shutil.which("wt")
+                if wt:
+                    wt_cmd = ["wt", "-d", cwd or os.getcwd(), "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", ps_encoded]
+                    subprocess.Popen(wt_cmd, env=env)
+                else:
+                    ps_exec = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", ps_encoded]
+                    subprocess.Popen(ps_exec, env=env, cwd=run_cwd, creationflags=creationflags)
+            else:
+                cmd = [exe] + args
+                subprocess.Popen(cmd, env=env, cwd=run_cwd)
         except Exception as exc:
             message_error(self, "失败", str(exc))
 
@@ -2777,15 +3105,15 @@ class OpenAIStatusPage(QtWidgets.QWidget):
         self.state = state
 
         layout = QtWidgets.QVBoxLayout(self)
-        header = QtWidgets.QLabel("OpenAI 状态")
+        header = QtWidgets.QLabel("OpenAI官网状态")
         header.setFont(self._header_font())
         layout.addWidget(header)
 
-        status_group = QtWidgets.QGroupBox("Codex/编程相关")
+        status_group = QtWidgets.QGroupBox("OpenAI官网组件状态")
         apply_white_shadow(status_group)
         status_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         status_layout = QtWidgets.QVBoxLayout(status_group)
-        self.status_text = QtWidgets.QPlainTextEdit()
+        self.status_text = QtWidgets.QTextEdit()
         self.status_text.setReadOnly(True)
         self.status_text.setMinimumHeight(200)
         self.status_text.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
@@ -2806,6 +3134,21 @@ class OpenAIStatusPage(QtWidgets.QWidget):
         action_row.addWidget(self.open_status_btn)
         action_row.addStretch(1)
         layout.addLayout(action_row)
+
+        info_group = QtWidgets.QGroupBox("数据来源说明")
+        apply_white_shadow(info_group)
+        info_layout = QtWidgets.QVBoxLayout(info_group)
+        info_text = QtWidgets.QLabel(
+            "<b>数据来源：</b>"
+            "<ul style='margin:4px 0 0 18px; padding:0;'>"
+            "<li>OpenAI 官方状态页 API：<a href='https://status.openai.com/api/v2/summary.json'>https://status.openai.com/api/v2/summary.json</a></li>"
+            "<li>本页展示的组件状态来自上述 API 的 components 列表</li>"
+            "</ul>"
+        )
+        info_text.setWordWrap(True)
+        info_text.setOpenExternalLinks(True)
+        info_layout.addWidget(info_text)
+        layout.addWidget(info_group)
 
         self._status_url = "https://status.openai.com"
         self._status_checked = False
@@ -2838,7 +3181,7 @@ class OpenAIStatusPage(QtWidgets.QWidget):
             def done() -> None:
                 self.refresh_status_btn.setEnabled(True)
                 if content:
-                    self.status_text.setPlainText(content)
+                    self.status_text.setHtml(content)
                 else:
                     self.status_text.setPlainText(f"无法获取状态：{err}")
 
@@ -2862,50 +3205,47 @@ class OpenAIStatusPage(QtWidgets.QWidget):
                     comp_map[name] = comp
 
         status = data.get("status") or {}
-        page = data.get("page") or {}
-        updated_at = page.get("updated_at") or status.get("updated_at") or ""
         indicator = status.get("indicator") or "-"
         desc = status.get("description") or "-"
 
-        lines = [f"总体状态：{desc} ({indicator})"]
-        if updated_at:
-            lines.append(f"更新时间：{updated_at}")
-            try:
-                ts = updated_at.replace("Z", "+00:00")
-                dt = datetime.fromisoformat(ts)
-                bj = dt.astimezone(timezone(timedelta(hours=8)))
-                lines.append(f"北京时间：{bj.strftime('%Y-%m-%d %H:%M:%S')}")
-            except Exception:
-                pass
-        lines.append("")
+        header = f"总体状态：{html.escape(str(desc))} ({html.escape(str(indicator))})"
 
-        abnormal: list[str] = []
+        status_colors = {
+            "under_maintenance": "#5bc0de",
+            "degraded_performance": "#f0ad4e",
+            "partial_outage": "#fd7e14",
+            "major_outage": "#d9534f",
+            "unknown": "#888888",
+        }
+
+        abnormal: list[tuple[str, str]] = []
         normal: list[str] = []
-        for name in CODING_COMPONENTS:
-            comp = comp_map.get(name)
-            hint = CODING_COMPONENT_HINTS.get(name, "")
-            if comp:
-                raw_status = comp.get("status", "unknown")
-                status_text = STATUS_TEXT.get(raw_status, raw_status)
-                line = f"- [{status_text}] {name}"
-            else:
-                raw_status = "unknown"
-                line = f"- [未知] {name}"
-            if hint:
-                line += f"：{hint}"
+        for comp in data.get("components", []) or []:
+            if not isinstance(comp, dict):
+                continue
+            name = comp.get("name")
+            if not isinstance(name, str):
+                continue
+            raw_status = comp.get("status", "unknown")
+            status_text = STATUS_TEXT.get(raw_status, raw_status)
+            line = f"- [{status_text}] {name}"
+            line = html.escape(line)
             if raw_status == "operational":
                 normal.append(line)
             else:
-                abnormal.append(line)
+                color = status_colors.get(raw_status, "#d9534f")
+                abnormal.append((line, color))
 
+        html_lines = [header, ""]
         if abnormal:
-            lines.append("异常/需关注：")
-            lines.extend(abnormal)
-            lines.append("")
-        lines.append("组件状态：")
-        lines.extend(normal)
+            html_lines.append("<b>异常/需关注：</b>")
+            for line, color in abnormal:
+                html_lines.append(f"<span style='color:{color};'>{line}</span>")
+            html_lines.append("")
+        html_lines.append("<b>组件状态：</b>")
+        html_lines.extend(normal)
 
-        return "\n".join(lines).strip()
+        return "<br>".join(html_lines).strip()
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -2951,9 +3291,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._add_nav_button(nav, "config.toml配置", "config_toml")
         self._add_nav_button(nav, "opencode 配置", "opencode")
         self._add_nav_button(nav, "多账号切换", "account")
-        self._add_nav_button(nav, "会话管理", "sessions")
+        self._add_nav_button(nav, "Codex会话管理", "sessions")
         self._add_nav_button(nav, "中转站接口", "network")
-        self._add_nav_button(nav, "OpenAI 状态", "openai_status")
+        self._add_nav_button(nav, "OpenAI官网状态", "openai_status")
         self._add_nav_button(nav, "检查更新", "settings")
         nav.addStretch(1)
 
