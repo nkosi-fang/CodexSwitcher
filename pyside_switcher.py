@@ -57,7 +57,7 @@ from codex_switcher import (
 
 
 APP_TITLE = "Codex Switcher"
-APP_VERSION = "2.0.2"
+APP_VERSION = "2.0.3"
 APP_REPO = "nkosi-fang/CodexSwitcher"
 
 CODING_COMPONENTS = [
@@ -2194,7 +2194,7 @@ class SettingsPage(QtWidgets.QWidget):
         threading.Thread(target=runner, daemon=True).start()
 
     def _filter_release_sections(self, body: str) -> str:
-        wanted = {"标题", "平台", "变更"}
+        wanted = {"标题", "变更"}
         lines = body.splitlines()
         out: list[str] = []
         keep = False
@@ -2259,7 +2259,7 @@ class SettingsPage(QtWidgets.QWidget):
         body = target.get("body") or ""
         filtered = self._filter_release_sections(body)
         if not filtered:
-            return "未找到Release中的标题/平台/变更内容。"
+            return "未找到Release中的标题/变更内容。"
         return filtered
 
     def _get_latest_release(self) -> tuple[bool, str, str, str]:
@@ -3139,7 +3139,7 @@ class OpenAIStatusPage(QtWidgets.QWidget):
         apply_white_shadow(info_group)
         info_layout = QtWidgets.QVBoxLayout(info_group)
         info_text = QtWidgets.QLabel(
-            "<b>数据来源：</b>"
+            ""
             "<ul style='margin:4px 0 0 18px; padding:0;'>"
             "<li>OpenAI 官方状态页 API：<a href='https://status.openai.com/api/v2/summary.json'>https://status.openai.com/api/v2/summary.json</a></li>"
             "<li>本页展示的组件状态来自上述 API 的 components 列表</li>"
