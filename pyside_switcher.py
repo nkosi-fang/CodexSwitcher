@@ -460,14 +460,16 @@ def probe_endpoints(
         "port_ms": port_ms,
     }
 
-
 class AppState:
     def __init__(self) -> None:
         self.store = load_store()
         self.active_account = get_active_account(self.store)
         self.codex_path: Optional[str] = None
         self.codex_version: Optional[str] = None
-
+        self.vscode_install_dir: Optional[str] = None
+        saved_dir = self.store.get("vscode_install_dir")
+        if isinstance(saved_dir, str) and saved_dir:
+            self.vscode_install_dir = saved_dir
 
 class AccountPage(QtWidgets.QWidget):
     def __init__(self, state: AppState, refresh_pages=None) -> None:
@@ -810,7 +812,6 @@ class AccountPage(QtWidgets.QWidget):
             self.test_btn.setEnabled(True)
             self.test_btn.setText("账户测试")
             message_error(self, "失败", str(exc))
-
 
 class NetworkDiagnosticsPage(QtWidgets.QWidget):
     def __init__(self, state: AppState) -> None:
@@ -1182,6 +1183,12 @@ class CodexStatusPage(QtWidgets.QWidget):
     def __init__(self, state: AppState) -> None:
         super().__init__()
         self.state = state
+        self._local_version: Optional[str] = None
+        self._latest_version: Optional[str] = None
+        self._workspace_dir: Optional[Path] = None
+        self._vscode_install_dir: Optional[Path] = None
+        if isinstance(self.state.vscode_install_dir, str) and self.state.vscode_install_dir:
+            self._vscode_install_dir = Path(self.state.vscode_install_dir)
 
         layout = QtWidgets.QVBoxLayout(self)
         header = QtWidgets.QLabel("Codex 状态")
@@ -1217,35 +1224,59 @@ class CodexStatusPage(QtWidgets.QWidget):
         self.latest_status = QtWidgets.QLabel("检测中...")
         self.latest_version = QtWidgets.QLabel("版本：-")
         self.latest_hint = QtWidgets.QLabel("更新命令：npm i -g @openai/codex@latest")
+        self.update_btn = QtWidgets.QPushButton("一键更新")
+        self.update_btn.clicked.connect(self.handle_update_click)
+        update_row = QtWidgets.QHBoxLayout()
+        update_row.addWidget(self.latest_hint)
+        update_row.addWidget(self.update_btn)
+        update_row.addStretch(1)
         latest_layout.addWidget(self.latest_status)
         latest_layout.addWidget(self.latest_version)
-        latest_layout.addWidget(self.latest_hint)
+        latest_layout.addLayout(update_row)
         self.latest_group = latest_group
         layout.addWidget(self.latest_group)
+
+        launch_group = QtWidgets.QGroupBox("一键启动")
+        apply_white_shadow(launch_group)
+        launch_layout = QtWidgets.QVBoxLayout(launch_group)
+        vscode_row = QtWidgets.QHBoxLayout()
+        self.vscode_path_label = QtWidgets.QLabel("VS Code 安装目录：未设置（将使用默认路径）")
+        self.vscode_path_label.setWordWrap(True)
+        self.vscode_path_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.pick_vscode_btn = QtWidgets.QPushButton("选择 VS Code 安装目录")
+        self.pick_vscode_btn.clicked.connect(self.pick_vscode_install_dir)
+        vscode_row.addWidget(self.vscode_path_label, 1)
+        vscode_row.addWidget(self.pick_vscode_btn)
+        launch_layout.addLayout(vscode_row)
+        path_row = QtWidgets.QHBoxLayout()
+        self.workspace_label = QtWidgets.QLabel("工作区：未选择")
+        self.workspace_label.setWordWrap(True)
+        self.workspace_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.pick_workspace_btn = QtWidgets.QPushButton("选择工作区")
+        self.pick_workspace_btn.clicked.connect(self.pick_workspace)
+        path_row.addWidget(self.workspace_label, 1)
+        path_row.addWidget(self.pick_workspace_btn)
+        launch_layout.addLayout(path_row)
+        launch_btn_row = QtWidgets.QHBoxLayout()
+        self.launch_codex_btn = QtWidgets.QPushButton("一键启动 CODEX CLI")
+        self.launch_codex_btn.clicked.connect(self.launch_codex_cli)
+        self.launch_vscode_btn = QtWidgets.QPushButton("一键启动 VS Code")
+        self.launch_vscode_btn.clicked.connect(self.launch_vscode)
+        self.fix_webview_btn = QtWidgets.QPushButton("WebView错误修改")
+        self.fix_webview_btn.clicked.connect(self.fix_webview_issue)
+        launch_btn_row.addWidget(self.launch_codex_btn)
+        launch_btn_row.addWidget(self.launch_vscode_btn)
+        launch_btn_row.addWidget(self.fix_webview_btn)
+        launch_btn_row.addStretch(1)
+        launch_layout.addLayout(launch_btn_row)
+        layout.addWidget(launch_group)
         
         self.compare_status = QtWidgets.QLabel("")
         self.compare_status.setVisible(False)
         self.progress_label = QtWidgets.QLabel("")
         layout.addWidget(self.progress_label)
         layout.addWidget(self.compare_status)
-
-        debug_group = QtWidgets.QGroupBox("诊断信息")
-        debug_group.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        debug_layout = QtWidgets.QVBoxLayout(debug_group)
-        self.debug_text = QtWidgets.QPlainTextEdit()
-        self.debug_text.setReadOnly(True)
-        self.debug_text.setMinimumHeight(140)
-        self.debug_text.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
-        debug_layout.addWidget(self.debug_text)
-
-        debug_btn_row = QtWidgets.QHBoxLayout()
-        self.copy_debug_btn = QtWidgets.QPushButton("复制诊断")
-        self.copy_debug_btn.clicked.connect(self.copy_debug)
-        debug_btn_row.addWidget(self.copy_debug_btn)
-        debug_btn_row.addStretch(1)
-        debug_layout.addLayout(debug_btn_row)
-        layout.addWidget(debug_group)
-        layout.setStretch(layout.count() - 1, 1)
+        layout.addStretch(1)
 
 
     def _header_font(self) -> QtGui.QFont:
@@ -1255,6 +1286,7 @@ class CodexStatusPage(QtWidgets.QWidget):
 
     def on_show(self) -> None:
         self.refresh_status()
+        self._refresh_vscode_install_label()
         self._update_debug()
 
     def _handle_refresh_click(self) -> None:
@@ -1272,6 +1304,8 @@ class CodexStatusPage(QtWidgets.QWidget):
         self.latest_group.setVisible(True)
         self.compare_status.setVisible(False)
         self.progress_label.setText("步骤：准备检测")
+        self._local_version = None
+        self._latest_version = None
 
         def runner() -> None:
             run_in_ui(lambda: self.progress_label.setText("步骤：检查本地 codex"))
@@ -1296,6 +1330,7 @@ class CodexStatusPage(QtWidgets.QWidget):
                     self.local_hint.setText("安装命令：npm i -g @openai/codex")
                 self.state.codex_path = local_path if local_ok else None
                 self.state.codex_version = local_ver if local_ok else None
+                self._local_version = local_ver if local_ok else None
                 self._update_debug()
 
             run_in_ui(apply_local)
@@ -1317,6 +1352,7 @@ class CodexStatusPage(QtWidgets.QWidget):
                     self.latest_status.setText("获取失败")
                     self.latest_version.setText(f"原因：{latest_msg}")
                     self.latest_hint.setText("")
+                self._latest_version = latest_ver if latest_ok else None
                 compare_text = ""
                 if local_ok and latest_ok:
                     compare_text = self._compare_versions(local_ver, latest_ver)
@@ -1330,6 +1366,374 @@ class CodexStatusPage(QtWidgets.QWidget):
             run_in_ui(apply_latest)
 
         threading.Thread(target=runner, daemon=True).start()
+
+    def handle_update_click(self) -> None:
+        latest = self._latest_version
+        if not latest:
+            message_warn(self, "提示", "未获取到官方最新版本，请先刷新检测")
+            return
+        local = self._local_version
+        latest_sem = self._extract_semver(latest or "")
+        local_sem = self._extract_semver(local or "")
+        if latest_sem and local_sem and latest_sem == local_sem:
+            message_info(self, "提示", "当前已是最新版本")
+            return
+        if not self._open_terminal_command("npm i -g @openai/codex@latest"):
+            message_error(self, "失败", "无法启动终端，请手动运行更新命令")
+            return
+        message_info(self, "提示", "已启动更新，请更新完成后重新打开窗口")
+
+    def pick_vscode_install_dir(self) -> None:
+        start_dir = str(self._vscode_install_dir) if self._vscode_install_dir else ""
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择 VS Code 安装目录", start_dir)
+        if not folder:
+            return
+        path = Path(folder)
+        exe = self._find_vscode_exe_in_dir(path)
+        if not exe:
+            message_warn(self, "提示", "未在所选目录找到 Code.exe 或 Code - Insiders.exe，请选择包含 Code.exe 的安装目录")
+            return
+        self._vscode_install_dir = path
+        self.state.vscode_install_dir = str(path)
+        self.state.store["vscode_install_dir"] = str(path)
+        save_store(self.state.store)
+        self._refresh_vscode_install_label()
+
+    def _refresh_vscode_install_label(self) -> None:
+        if self._vscode_install_dir and self._vscode_install_dir.exists():
+            self.vscode_path_label.setText(f"VS Code 安装目录：{self._vscode_install_dir}")
+        else:
+            self.vscode_path_label.setText("VS Code 安装目录：未设置（将使用默认路径）")
+
+    def _find_vscode_exe_in_dir(self, root: Path) -> Optional[str]:
+        candidates = [
+            root / "Code.exe",
+            root / "Code - Insiders.exe",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+        return None
+
+    def pick_workspace(self) -> None:
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择工作区")
+        if not folder:
+            return
+        path = Path(folder)
+        if not path.exists() or not path.is_dir():
+            message_warn(self, "提示", "选择的目录无效")
+            return
+        self._workspace_dir = path
+        self.workspace_label.setText(f"工作区：{path}")
+
+    def _ensure_workspace(self) -> Optional[Path]:
+        if not self._workspace_dir:
+            message_warn(self, "提示", "请先选择工作区")
+            return None
+        if not self._workspace_dir.exists():
+            message_warn(self, "提示", "工作区不存在")
+            return None
+        return self._workspace_dir
+
+    def launch_codex_cli(self) -> None:
+        workspace = self._ensure_workspace()
+        if not workspace:
+            return
+        exe = self._find_codex_exe()
+        if exe and not Path(exe).is_file():
+            exe = None
+        if not exe:
+            message_warn(self, "提示", "未找到 codex 命令，请先安装（可用 npm prefix -g 查看全局目录）")
+            return
+        suffix = Path(exe).suffix.lower()
+        if suffix in (".cmd", ".bat"):
+            cmd = self._cmd_quote(str(exe))
+            ok = self._open_terminal_command(cmd, cwd=workspace, shell="cmd")
+        else:
+            cmd = f"& {self._ps_quote(str(exe))}"
+            ok = self._open_terminal_command(cmd, cwd=workspace)
+        if not ok:
+            message_error(self, "失败", "无法启动终端，请手动运行 codex")
+
+    def launch_vscode(self) -> None:
+        workspace = self._ensure_workspace()
+        if not workspace:
+            return
+        code_cli = self._find_vscode_cli()
+        args = None
+        if code_cli and self._vscode_supports_command(code_cli):
+            args = [code_cli, "-r", str(workspace), "--command", "chatgpt.openSidebar"]
+        else:
+            if code_cli:
+                args = [code_cli, "-r", str(workspace)]
+            else:
+                code_exe = self._find_vscode_exe()
+                if code_exe:
+                    args = [code_exe, str(workspace)]
+            self._ensure_open_on_startup(workspace)
+        if not args:
+            message_warn(self, "提示", "未找到 VS Code，可先安装或在 PATH 中启用 code 命令")
+            return
+        try:
+            subprocess.Popen(args)
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+            return
+        message_info(self, "提示", "已打开VS Code并自动启动codex插件，如果遇到VS Code提示“WebView视图相关错误提示”，请点击“WebView错误修改”按钮。")
+
+    def _cmd_quote(self, value: str) -> str:
+        return '"' + value.replace('"', '""') + '"'
+
+    def fix_webview_issue(self) -> None:
+        workspace = self._ensure_workspace()
+        if not workspace:
+            return
+
+        def worker() -> None:
+            self._kill_vscode_processes()
+            self._clear_vscode_cache(self._vscode_install_dir)
+            run_in_ui(self.launch_vscode)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _kill_vscode_processes(self) -> None:
+        targets = [
+            "Code.exe",
+            "Code - Insiders.exe",
+            "msedgewebview2.exe",
+            "ServiceHub.RoslynCodeAnalysisService.exe",
+            "ServiceHub.Host.Node.x64.exe",
+            "ServiceHub.TestWindowStoreHost.exe",
+        ]
+        for name in targets:
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/IM", name], capture_output=True, text=True)
+            except Exception:
+                continue
+
+    def _clear_vscode_cache(self, install_dir: Optional[Path] = None) -> None:
+        appdata = os.environ.get("APPDATA")
+        local = os.environ.get("LOCALAPPDATA")
+        paths = []
+        channel = None
+        portable_user_data = None
+        if install_dir:
+            if (install_dir / "Code - Insiders.exe").is_file():
+                channel = "insiders"
+            elif (install_dir / "Code.exe").is_file():
+                channel = "stable"
+            portable_root = install_dir / "data" / "user-data"
+            if portable_root.is_dir():
+                portable_user_data = portable_root
+        if portable_user_data:
+            base = portable_user_data
+            paths += [
+                base / "WebView",
+                base / "CachedData",
+                base / "Cache",
+                base / "GPUCache",
+                base / "Local Storage",
+                base / "Service Worker" / "CacheStorage",
+                base / "Service Worker" / "ScriptCache",
+                base / "User" / "workspaceStorage",
+                base / "User" / "globalStorage",
+            ]
+        else:
+            if channel == "stable":
+                names = ["Code"]
+            elif channel == "insiders":
+                names = ["Code - Insiders"]
+            else:
+                names = ["Code", "Code - Insiders"]
+            if appdata:
+                base = Path(appdata)
+                for name in names:
+                    root = base / name
+                    paths += [
+                        root / "WebView",
+                        root / "CachedData",
+                        root / "Cache",
+                        root / "GPUCache",
+                        root / "Local Storage",
+                        root / "Service Worker" / "CacheStorage",
+                        root / "Service Worker" / "ScriptCache",
+                    ]
+            if local:
+                base = Path(local) / "Microsoft"
+                if channel == "stable":
+                    local_names = ["Code"]
+                elif channel == "insiders":
+                    local_names = ["Code - Insiders"]
+                else:
+                    local_names = ["Code", "Code - Insiders"]
+                for name in local_names:
+                    root = base / name
+                    paths += [
+                        root / "User" / "workspaceStorage",
+                        root / "User" / "globalStorage",
+                    ]
+                paths.append(Path(local) / "Temp" / "Code")
+        for p in paths:
+            try:
+                if p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+                elif p.exists():
+                    p.unlink(missing_ok=True)
+            except Exception:
+                continue
+
+    def _ps_quote(self, value: str) -> str:
+        return "'" + value.replace("'", "''") + "'"
+
+    def _build_ps_command(self, command: str, cwd: Optional[Path]) -> str:
+        if cwd:
+            return f"Set-Location -LiteralPath {self._ps_quote(str(cwd))}; {command}"
+        return command
+
+    def _find_windows_terminal(self) -> Optional[str]:
+        return shutil.which("wt") or shutil.which("wt.exe")
+
+    def _open_terminal_command(self, command: str, cwd: Optional[Path] = None, shell: str = "powershell") -> bool:
+        if shell == "cmd":
+            return self._open_cmd_terminal(command, cwd)
+        ps_command = self._build_ps_command(command, cwd)
+        wt_exe = self._find_windows_terminal()
+        if wt_exe:
+            args = [wt_exe]
+            if cwd:
+                args += ["-d", str(cwd)]
+            args += ["powershell", "-NoExit", "-Command", ps_command]
+            try:
+                subprocess.Popen(args)
+                return True
+            except Exception:
+                return False
+        ps_exe = shutil.which("powershell") or shutil.which("powershell.exe")
+        if not ps_exe:
+            return False
+        args = [ps_exe, "-NoExit", "-Command", ps_command]
+        try:
+            creationflags = 0x00000010 if os.name == "nt" else 0
+            subprocess.Popen(args, creationflags=creationflags)
+            return True
+        except Exception:
+            return False
+
+    def _open_cmd_terminal(self, command: str, cwd: Optional[Path] = None) -> bool:
+        wt_exe = self._find_windows_terminal()
+        if wt_exe:
+            args = [wt_exe]
+            if cwd:
+                args += ["-d", str(cwd)]
+            args += ["cmd", "/k", command]
+            try:
+                subprocess.Popen(args)
+                return True
+            except Exception:
+                return False
+        cmd_exe = shutil.which("cmd") or shutil.which("cmd.exe")
+        if not cmd_exe:
+            return False
+        args = [cmd_exe, "/k", command]
+        try:
+            creationflags = 0x00000010 if os.name == "nt" else 0
+            subprocess.Popen(args, creationflags=creationflags)
+            return True
+        except Exception:
+            return False
+
+    def _vscode_supports_command(self, code_cli: str) -> bool:
+        try:
+            creationflags = 0x08000000 if os.name == "nt" else 0
+            proc = subprocess.run([code_cli, "--help"], capture_output=True, text=True, timeout=3, creationflags=creationflags)
+        except Exception:
+            return False
+        output = (proc.stdout or "") + (proc.stderr or "")
+        return "--command" in output
+
+
+    def _load_jsonc(self, text: str) -> dict:
+        no_block = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        no_line = re.sub(r"//.*", "", no_block)
+        try:
+            return json.loads(no_line) if no_line.strip() else {}
+        except Exception:
+            return {}
+
+    def _ensure_open_on_startup(self, workspace: Path) -> bool:
+        settings_path = workspace / ".vscode" / "settings.json"
+        try:
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            raw = settings_path.read_text(encoding="utf-8", errors="ignore") if settings_path.exists() else ""
+            data = self._load_jsonc(raw)
+            data["chatgpt.openOnStartup"] = True
+            settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            return True
+        except Exception:
+            return False
+
+    def _find_vscode_cli(self) -> Optional[str]:
+        for name in ("code", "code.cmd", "code.exe", "code-insiders", "code-insiders.cmd"):
+            path = shutil.which(name)
+            if path:
+                return path
+        return None
+
+    def _find_vscode_exe(self) -> Optional[str]:
+        if self._vscode_install_dir and self._vscode_install_dir.exists():
+            exe = self._find_vscode_exe_in_dir(self._vscode_install_dir)
+            if exe:
+                return exe
+        candidates = []
+        local = os.environ.get("LOCALAPPDATA")
+        program = os.environ.get("ProgramFiles") or os.environ.get("PROGRAMFILES")
+        program_x86 = os.environ.get("ProgramFiles(x86)") or os.environ.get("PROGRAMFILES(X86)")
+        if local:
+            candidates.append(Path(local) / "Programs" / "Microsoft VS Code" / "Code.exe")
+            candidates.append(Path(local) / "Programs" / "Microsoft VS Code Insiders" / "Code - Insiders.exe")
+        if program:
+            candidates.append(Path(program) / "Microsoft VS Code" / "Code.exe")
+            candidates.append(Path(program) / "Microsoft VS Code Insiders" / "Code - Insiders.exe")
+        if program_x86:
+            candidates.append(Path(program_x86) / "Microsoft VS Code" / "Code.exe")
+            candidates.append(Path(program_x86) / "Microsoft VS Code Insiders" / "Code - Insiders.exe")
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+        return None
+
+    def _get_npm_prefix_global(self) -> Optional[Path]:
+        npm_exe = shutil.which("npm") or shutil.which("npm.cmd") or shutil.which("npm.exe")
+        if not npm_exe:
+            return None
+        try:
+            creationflags = 0x08000000 if os.name == "nt" else 0
+            proc = subprocess.run([npm_exe, "prefix", "-g"], capture_output=True, text=True, timeout=5, creationflags=creationflags)
+        except Exception:
+            return None
+        if proc.returncode != 0:
+            return None
+        prefix = (proc.stdout or "").strip()
+        if not prefix:
+            return None
+        return Path(prefix)
+
+    def _find_codex_in_npm_prefix(self) -> Optional[str]:
+        prefix = self._get_npm_prefix_global()
+        if not prefix:
+            return None
+        candidates = [
+            prefix / "node_modules" / ".bin" / "codex.cmd",
+            prefix / "node_modules" / ".bin" / "codex.exe",
+            prefix / "node_modules" / ".bin" / "codex",
+            prefix / "bin" / "codex",
+            prefix / "bin" / "codex.cmd",
+            prefix / "codex.cmd",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+        return None
 
     def _build_search_paths(self) -> List[str]:
         paths = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
@@ -1386,6 +1790,9 @@ class CodexStatusPage(QtWidgets.QWidget):
         if exe:
             return exe
         exe = self._which_in_paths("codex", self._build_search_paths())
+        if exe:
+            return exe
+        exe = self._find_codex_in_npm_prefix()
         if exe:
             return exe
         where_exe = self._get_where_exe()
@@ -1513,8 +1920,6 @@ class CodexStatusPage(QtWidgets.QWidget):
         except Exception:
             pass
         return f"检测到新版本：{latest_sem}，可更新。"
-
-
 
 class ConfigTomlPage(QtWidgets.QWidget):
     def __init__(self, state: AppState) -> None:
@@ -2078,7 +2483,835 @@ class OpencodeConfigPage(QtWidgets.QWidget):
             self.status_label.setText(f"保存失败：{exc}")
 
 
+
+
+class SkillsPage(QtWidgets.QWidget):
+    def __init__(self, state: AppState) -> None:
+        super().__init__()
+        self.state = state
+        self.skill_items: List[Dict[str, object]] = []
+
+        layout = QtWidgets.QVBoxLayout(self)
+        header = QtWidgets.QLabel("Skill 管理")
+        header.setFont(self._header_font())
+        layout.addWidget(header)
+
+        action_row = QtWidgets.QHBoxLayout()
+        self.refresh_btn = QtWidgets.QPushButton("刷新列表")
+        self.refresh_btn.clicked.connect(self.refresh_list)
+        self.import_btn = QtWidgets.QPushButton("导入 Skill")
+        self.import_btn.clicked.connect(self.import_skill)
+        self.backup_btn = QtWidgets.QPushButton("备份技能")
+        self.backup_btn.clicked.connect(self.backup_skills)
+        self.open_backup_btn = QtWidgets.QPushButton("打开备份目录")
+        self.open_backup_btn.clicked.connect(self.open_backup_root)
+        self.open_root_btn = QtWidgets.QPushButton("打开技能目录")
+        self.open_root_btn.clicked.connect(self.open_skills_root)
+        action_row.addWidget(self.refresh_btn)
+        action_row.addWidget(self.import_btn)
+        action_row.addWidget(self.open_root_btn)
+        action_row.addWidget(self.backup_btn)
+        action_row.addWidget(self.open_backup_btn)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
+
+        body = QtWidgets.QHBoxLayout()
+        layout.addLayout(body, 1)
+
+        list_group = QtWidgets.QGroupBox("Skill 列表")
+        apply_white_shadow(list_group)
+        list_layout = QtWidgets.QVBoxLayout(list_group)
+        self.list_widget = QtWidgets.QListWidget()
+        self.list_widget.setMinimumWidth(260)
+        self.list_widget.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.AdjustIgnored)
+        self.list_widget.setTextElideMode(QtCore.Qt.ElideRight)
+        self.list_widget.currentRowChanged.connect(self.on_select)
+        list_layout.addWidget(self.list_widget)
+        body.addWidget(list_group, 1)
+
+        detail_group = QtWidgets.QGroupBox("Skill 详情")
+        apply_white_shadow(detail_group)
+        detail_layout = QtWidgets.QVBoxLayout(detail_group)
+
+        info_group = QtWidgets.QGroupBox("基本信息")
+        apply_white_shadow(info_group)
+        info_layout = QtWidgets.QFormLayout(info_group)
+        self.name_label = QtWidgets.QLabel("-")
+        self.desc_label = QtWidgets.QLabel("-")
+        self.desc_label.setWordWrap(True)
+        self.source_label = QtWidgets.QLabel("-")
+        self.path_label = QtWidgets.QLabel("-")
+        self.path_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        info_layout.addRow("名称", self.name_label)
+        info_layout.addRow("描述", self.desc_label)
+        info_layout.addRow("来源", self.source_label)
+        info_layout.addRow("路径", self.path_label)
+        detail_layout.addWidget(info_group)
+
+        readme_group = QtWidgets.QGroupBox("使用说明")
+        apply_white_shadow(readme_group)
+        readme_layout = QtWidgets.QVBoxLayout(readme_group)
+        self.readme_text = QtWidgets.QPlainTextEdit()
+        self.readme_text.setReadOnly(True)
+        self.readme_text.setMinimumHeight(180)
+        readme_layout.addWidget(self.readme_text)
+        detail_layout.addWidget(readme_group, 1)
+
+        btn_row = QtWidgets.QHBoxLayout()
+        self.open_btn = QtWidgets.QPushButton("打开所在目录")
+        self.open_btn.clicked.connect(self.open_selected_folder)
+        self.remove_btn = QtWidgets.QPushButton("删除 Skill")
+        self.remove_btn.clicked.connect(self.remove_skill)
+        btn_row.addWidget(self.open_btn)
+        btn_row.addWidget(self.remove_btn)
+        btn_row.addStretch(1)
+        detail_layout.addLayout(btn_row)
+
+        body.addWidget(detail_group, 2)
+
+        self.status_label = QtWidgets.QLabel("")
+        layout.addWidget(self.status_label)
+
+    def _header_font(self) -> QtGui.QFont:
+        font = QtGui.QFont("Segoe UI", 12)
+        font.setBold(True)
+        return font
+
+    def on_show(self) -> None:
+        self.refresh_list()
+
+    def _skills_root(self) -> Path:
+        return Path.home() / ".codex" / "skills"
+
+
+    def _extract_title_desc(self, text: str, fallback: str) -> tuple[str, str]:
+        name = ""
+        desc = ""
+        lines = text.splitlines()
+
+        if lines and lines[0].strip() == "---":
+            for line in lines[1:]:
+                stripped = line.strip()
+                if stripped == "---":
+                    break
+                if ":" not in stripped:
+                    continue
+                key, value = stripped.split(":", 1)
+                key = key.strip().lower()
+                value = value.strip()
+                if key == "name" and value:
+                    name = value
+                elif key == "description" and value:
+                    desc = value
+
+        if not name or not desc:
+            for line in lines[:30]:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                lower = stripped.lower()
+                if not name and lower.startswith("name:"):
+                    name = stripped.split(":", 1)[1].strip()
+                    continue
+                if not desc and lower.startswith("description:"):
+                    desc = stripped.split(":", 1)[1].strip()
+                    continue
+                if name and desc:
+                    break
+
+        if not name:
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    name = stripped.lstrip("#").strip()
+                    break
+
+        if not desc:
+            for line in lines:
+                stripped = line.strip()
+                if not stripped or stripped == "---":
+                    continue
+                lower = stripped.lower()
+                if lower.startswith("name:") or lower.startswith("description:"):
+                    continue
+                if stripped.startswith("#"):
+                    continue
+                desc = stripped
+                break
+
+        if not name:
+            name = fallback
+        if not desc:
+            desc = "无描述"
+        return name, desc
+
+    def _build_skill_item(self, path: Path, source: str) -> Dict[str, object]:
+        skill_md = path / "SKILL.md"
+        title = path.name
+        desc = "无描述"
+        has_doc = False
+        if skill_md.exists():
+            try:
+                content = skill_md.read_text(encoding="utf-8", errors="ignore")
+                title, desc = self._extract_title_desc(content, path.name)
+                has_doc = True
+            except Exception:
+                has_doc = False
+        return {
+            "name": title,
+            "desc": desc,
+            "path": path,
+            "source": source,
+            "has_doc": has_doc,
+        }
+
+    def _find_skill_dirs(self, base: Path) -> List[Path]:
+        results: List[Path] = []
+        try:
+            for root, _dirs, files in os.walk(base):
+                if "SKILL.md" in files:
+                    results.append(Path(root))
+        except Exception:
+            return results
+        return results
+
+    def refresh_list(self) -> None:
+        self.list_widget.clear()
+        self.skill_items = []
+        root = self._skills_root()
+        if not root.exists():
+            self.status_label.setText(f"技能目录不存在：{root}")
+            self._reset_detail()
+            return
+
+        system_dir = root / ".system"
+        if system_dir.exists():
+            for entry in sorted(system_dir.iterdir()):
+                if entry.is_dir():
+                    self.skill_items.append(self._build_skill_item(entry, "系统"))
+
+        user_dir = root / "user"
+        if user_dir.exists():
+            for entry in self._find_skill_dirs(user_dir):
+                self.skill_items.append(self._build_skill_item(entry, "用户"))
+
+        for entry in sorted(root.iterdir()):
+            if entry.is_dir() and entry.name not in (".system", "user"):
+                self.skill_items.append(self._build_skill_item(entry, "本地"))
+
+        for item in self.skill_items:
+            label = f"[{item['source']}] {item['name']}"
+            if item.get("desc"):
+                label = f"{label} - {item['desc']}"
+            list_item = QtWidgets.QListWidgetItem(label)
+            list_item.setData(QtCore.Qt.UserRole, item)
+            self.list_widget.addItem(list_item)
+
+        if not self.skill_items:
+            self.status_label.setText("未发现任何技能")
+            self._reset_detail()
+        else:
+            self.status_label.setText(f"共 {len(self.skill_items)} 个技能")
+            self.list_widget.setCurrentRow(0)
+
+    def _reset_detail(self) -> None:
+        self.name_label.setText("-")
+        self.desc_label.setText("-")
+        self.source_label.setText("-")
+        self.path_label.setText("-")
+        self.readme_text.setPlainText("")
+        self.remove_btn.setEnabled(False)
+        self.open_btn.setEnabled(False)
+
+    def on_select(self, row: int) -> None:
+        if row < 0 or row >= self.list_widget.count():
+            self._reset_detail()
+            return
+        item = self.list_widget.item(row)
+        data = item.data(QtCore.Qt.UserRole)
+        if not isinstance(data, dict):
+            self._reset_detail()
+            return
+        name = str(data.get("name", "-"))
+        desc = str(data.get("desc", "-"))
+        source = str(data.get("source", "-"))
+        path = data.get("path")
+        self.name_label.setText(name)
+        self.desc_label.setText(desc)
+        self.source_label.setText(source)
+        self.path_label.setText(str(path) if path else "-")
+
+        self.open_btn.setEnabled(bool(path))
+        self.remove_btn.setEnabled(source != "系统")
+
+        readme = ""
+        if isinstance(path, Path):
+            skill_md = path / "SKILL.md"
+            if skill_md.exists():
+                try:
+                    readme = skill_md.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    readme = "读取 SKILL.md 失败"
+            else:
+                readme = "未找到 SKILL.md"
+        self.readme_text.setPlainText(readme)
+
+
+    def _backup_base_dir(self) -> Path:
+        return self._skills_root().parent
+
+    def _generate_backup_dir(self) -> Path:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return self._backup_base_dir() / f"skills_backup_{stamp}"
+
+    def _prune_backups(self, keep: int = 5) -> None:
+        base = self._backup_base_dir()
+        if not base.exists():
+            return
+        backups = [p for p in base.iterdir() if p.is_dir() and p.name.startswith("skills_backup_")]
+        backups.sort(key=lambda p: p.name)
+        if len(backups) <= keep:
+            return
+        for old in backups[:-keep]:
+            try:
+                shutil.rmtree(old)
+            except Exception:
+                continue
+
+    def backup_skills(self) -> None:
+        root = self._skills_root()
+        if not root.exists():
+            message_warn(self, "提示", f"技能目录不存在：{root}")
+            return
+        backup_dir = self._generate_backup_dir()
+        try:
+            shutil.copytree(root, backup_dir)
+            self._prune_backups()
+            self.status_label.setText(f"已备份：{backup_dir}")
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+
+
+    def open_backup_root(self) -> None:
+        base = self._backup_base_dir()
+        if not base.exists():
+            message_warn(self, "提示", f"备份目录不存在：{base}")
+            return
+        try:
+            os.startfile(str(base))
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+
+    def open_skills_root(self) -> None:
+        root = self._skills_root()
+        if not root.exists():
+            message_warn(self, "提示", f"技能目录不存在：{root}")
+            return
+        try:
+            os.startfile(str(root))
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+
+    def open_selected_folder(self) -> None:
+        row = self.list_widget.currentRow()
+        if row < 0:
+            return
+        item = self.list_widget.item(row)
+        data = item.data(QtCore.Qt.UserRole)
+        path = data.get("path") if isinstance(data, dict) else None
+        if not isinstance(path, Path):
+            message_warn(self, "提示", "未找到技能目录")
+            return
+        try:
+            os.startfile(str(path))
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+
+    def import_skill(self) -> None:
+        root = self._skills_root()
+        root.mkdir(parents=True, exist_ok=True)
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择技能目录")
+        if not folder:
+            return
+        src = Path(folder)
+        if not src.exists() or not src.is_dir():
+            message_warn(self, "提示", "选择的目录无效")
+            return
+        dest = root / src.name
+        if dest.exists():
+            message_warn(self, "提示", f"目标已存在：{dest.name}")
+            return
+        try:
+            shutil.copytree(src, dest)
+            self.status_label.setText(f"已导入技能：{dest.name}")
+            self.refresh_list()
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+
+    def remove_skill(self) -> None:
+        row = self.list_widget.currentRow()
+        if row < 0:
+            return
+        item = self.list_widget.item(row)
+        data = item.data(QtCore.Qt.UserRole)
+        if not isinstance(data, dict):
+            return
+        source = data.get("source")
+        path = data.get("path")
+        name = data.get("name", "")
+        if source == "系统":
+            message_warn(self, "提示", "系统技能不允许删除")
+            return
+        if not isinstance(path, Path):
+            message_warn(self, "提示", "未找到技能目录")
+            return
+        ok = QtWidgets.QMessageBox.question(
+            self,
+            "确认删除",
+            f"确定删除技能 “{name}” 吗？该操作不可恢复。",
+        )
+        if ok != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            shutil.rmtree(path)
+            self.status_label.setText(f"已删除技能：{name}")
+            self.refresh_list()
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+
+
+
+class VSCodePluginPage(QtWidgets.QWidget):
+    def __init__(self, state: AppState) -> None:
+        super().__init__()
+        self.state = state
+        self.extension_items: List[Dict[str, object]] = []
+        self._index_path: Optional[Path] = None
+        self._backup_dir: Optional[Path] = None
+
+        layout = QtWidgets.QVBoxLayout(self)
+        header = QtWidgets.QLabel("VS Code 插件")
+        header.setFont(self._header_font())
+        layout.addWidget(header)
+
+        action_row = QtWidgets.QHBoxLayout()
+        self.scan_btn = QtWidgets.QPushButton("扫描插件")
+        self.scan_btn.clicked.connect(self.refresh_extensions)
+        self.pick_index_btn = QtWidgets.QPushButton("选择 index 文件")
+        self.pick_index_btn.clicked.connect(self.pick_index_file)
+        self.open_ext_btn = QtWidgets.QPushButton("打开插件目录")
+        self.open_ext_btn.clicked.connect(self.open_extension_folder)
+        self.disable_update_btn = QtWidgets.QPushButton("关闭自动更新")
+        self.disable_update_btn.clicked.connect(self.disable_auto_update)
+        action_row.addWidget(self.scan_btn)
+        action_row.addWidget(self.pick_index_btn)
+        action_row.addWidget(self.open_ext_btn)
+        action_row.addWidget(self.disable_update_btn)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
+
+        info_group = QtWidgets.QGroupBox("插件信息")
+        apply_white_shadow(info_group)
+        info_layout = QtWidgets.QFormLayout(info_group)
+        self.ext_combo = QtWidgets.QComboBox()
+        self.ext_combo.currentIndexChanged.connect(self.on_extension_changed)
+        self.ext_path_label = QtWidgets.QLabel("-")
+        self.ext_path_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.index_path_label = QtWidgets.QLabel("-")
+        self.index_path_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        self.index_path_label.setWordWrap(True)
+        self.index_path_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        self.ext_version_label = QtWidgets.QLabel("-")
+        self.ext_latest_label = QtWidgets.QLabel("-")
+        info_layout.addRow("插件目录", self.ext_combo)
+        info_layout.addRow("路径", self.ext_path_label)
+        info_layout.addRow("插件版本", self.ext_version_label)
+        info_layout.addRow("最新版本", self.ext_latest_label)
+        info_layout.addRow("index 文件", self.index_path_label)
+        layout.addWidget(info_group)
+
+        model_group = QtWidgets.QGroupBox("增加codex vscode中可用模型")
+        apply_white_shadow(model_group)
+        model_layout = QtWidgets.QFormLayout(model_group)
+        self.model_edit = QtWidgets.QLineEdit()
+        self.model_edit.setPlaceholderText("gpt-5.2-codex")
+        self.model_edit.setText("gpt-5.2-codex")
+        self.apply_btn = QtWidgets.QPushButton("备份并应用")
+        self.apply_btn.clicked.connect(self.apply_patch)
+        self.open_backup_btn = QtWidgets.QPushButton("打开备份目录")
+        self.open_backup_btn.clicked.connect(self.open_backup_dir)
+        self.restore_btn = QtWidgets.QPushButton("恢复默认设置")
+        self.restore_btn.clicked.connect(self.restore_backup)
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addWidget(self.apply_btn)
+        btn_row.addWidget(self.restore_btn)
+        btn_row.addWidget(self.open_backup_btn)
+        btn_row.addStretch(1)
+        model_layout.addRow("模型名称", self.model_edit)
+        model_layout.addRow("操作", btn_row)
+        layout.addWidget(model_group)
+
+        hint = QtWidgets.QLabel(
+            '<span style="color:#000;font-weight:700;">修改后请重启 VS Code 或插件。</span><br>'
+            '<span style="color:#666;">原理：工具会把你输入的模型加入可用模型列表，并放宽仅 ChatGPT 登录的限制，让 API Key 也能选到该模型。</span>'
+            '<ul style="margin:6px 0 0 18px; padding:0; color:#666;">'
+            '<li>“最新版本”来自 Marketplace，若离线会显示“获取失败”。</li>'
+            '<li>“恢复默认设置”会恢复最近一次备份（保留原逻辑）。</li>'
+            '</ul>'
+        )
+        hint.setTextFormat(QtCore.Qt.RichText)
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.status_label = QtWidgets.QLabel("")
+        layout.addWidget(self.status_label)
+        layout.addStretch(1)
+
+    def _header_font(self) -> QtGui.QFont:
+        font = QtGui.QFont("Segoe UI", 12)
+        font.setBold(True)
+        return font
+
+    def on_show(self) -> None:
+        self.refresh_extensions()
+
+    def _extension_roots(self) -> List[Path]:
+        home = Path.home()
+        roots = [
+            home / ".vscode" / "extensions",
+            home / ".vscode-insiders" / "extensions",
+            home / ".vscode-oss" / "extensions",
+            home / ".cursor" / "extensions",
+        ]
+        return [p for p in roots if p.exists()]
+
+    def _find_extensions(self) -> List[Path]:
+        results: List[Path] = []
+        for root in self._extension_roots():
+            for entry in root.iterdir():
+                if not entry.is_dir():
+                    continue
+                name = entry.name.lower()
+                if name.startswith("openai.chatgpt"):
+                    results.append(entry)
+        return results
+
+    def _find_index_file(self, ext_path: Path) -> Optional[Path]:
+        assets = ext_path / "webview" / "assets"
+        if not assets.exists():
+            return None
+        candidates = list(assets.glob("index-*.js"))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda p: (p.stat().st_mtime, p.stat().st_size), reverse=True)
+        return candidates[0]
+
+
+    def _parse_extension_version(self, ext_path: Path) -> str:
+        name = ext_path.name
+        if "openai.chatgpt-" in name:
+            return name.split("openai.chatgpt-", 1)[1] or "未知"
+        if "-" in name:
+            return name.rsplit("-", 1)[-1]
+        return "未知"
+
+
+    def _fetch_latest_extension_version(self) -> Optional[str]:
+        url = "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery"
+        payload = {
+            "filters": [
+                {
+                    "criteria": [
+                        {"filterType": 7, "value": "openai.chatgpt"},
+                        {"filterType": 8, "value": "openai"},
+                    ]
+                }
+            ],
+            "flags": 0x1 | 0x2 | 0x80,
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib_request.Request(url, data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Accept", "application/json;api-version=7.1-preview.1")
+        try:
+            with urllib_request.urlopen(req, timeout=6) as resp:
+                body = resp.read().decode("utf-8", errors="ignore")
+            obj = json.loads(body)
+        except Exception:
+            return None
+        try:
+            ext = obj["results"][0]["extensions"][0]
+            versions = ext.get("versions", [])
+            if versions:
+                return versions[0].get("version") or None
+        except Exception:
+            return None
+        return None
+
+    def refresh_extensions(self) -> None:
+        self.ext_combo.clear()
+        self.extension_items = []
+        latest = self._fetch_latest_extension_version()
+        if latest:
+            self.ext_latest_label.setText(latest)
+        else:
+            self.ext_latest_label.setText("获取失败")
+        for path in self._find_extensions():
+            self.extension_items.append({"path": path, "version": self._parse_extension_version(path)})
+        if not self.extension_items:
+            self.ext_combo.addItem("未发现 openai.chatgpt 扩展")
+            self.ext_path_label.setText("-")
+            self.ext_version_label.setText("-")
+            self.index_path_label.setText("-")
+            self._index_path = None
+            self.status_label.setText("未发现 VS Code 扩展，请确认已安装 Codex 插件")
+            return
+        for item in self.extension_items:
+            self.ext_combo.addItem(item["path"].name, item)
+        self.ext_combo.setCurrentIndex(0)
+        self.on_extension_changed(0)
+
+    def on_extension_changed(self, index: int) -> None:
+        if index < 0 or index >= len(self.extension_items):
+            return
+        item = self.extension_items[index]
+        ext_path = item["path"]
+        self.ext_path_label.setText(str(ext_path))
+        self.ext_version_label.setText(str(item.get("version", "-")))
+        self._index_path = self._find_index_file(ext_path)
+        self.index_path_label.setText(str(self._index_path) if self._index_path else "未找到")
+
+    def pick_index_file(self) -> None:
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "选择 index-*.js",
+            "",
+            "JavaScript (*.js)"
+        )
+        if not file_path:
+            return
+        self._index_path = Path(file_path)
+        self.index_path_label.setText(str(self._index_path))
+        self.status_label.setText("已选择 index 文件")
+
+    def open_extension_folder(self) -> None:
+        idx = self.ext_combo.currentIndex()
+        if idx < 0 or idx >= len(self.extension_items):
+            return
+        ext_path = self.extension_items[idx]["path"]
+        try:
+            os.startfile(str(ext_path))
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+
+    def _backup_dir_for_index(self, index_path: Path) -> Path:
+        backup_dir = index_path.parent / "backup"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        return backup_dir
+
+    def _backup_index(self, index_path: Path) -> Path:
+        backup_dir = self._backup_dir_for_index(index_path)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = backup_dir / f"{index_path.name}.{stamp}.bak"
+        shutil.copy2(index_path, backup_path)
+        self._backup_dir = backup_dir
+        return backup_path
+
+
+    def restore_backup(self) -> None:
+        if not self._index_path or not self._index_path.exists():
+            message_warn(self, "提示", "未找到 index 文件")
+            return
+        backup_dir = self._backup_dir_for_index(self._index_path)
+        if not backup_dir.exists():
+            message_warn(self, "提示", "未发现备份目录")
+            return
+        pattern = f"{self._index_path.name}."
+        backups = [p for p in backup_dir.iterdir() if p.is_file() and p.name.startswith(pattern) and p.suffix == ".bak"]
+        if not backups:
+            message_warn(self, "提示", "未找到备份文件")
+            return
+        backups.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        latest_backup = backups[0]
+        try:
+            shutil.copy2(latest_backup, self._index_path)
+            self.status_label.setText(f"已恢复：{latest_backup}")
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+
+    def open_backup_dir(self) -> None:
+        if not self._backup_dir:
+            message_warn(self, "提示", "尚未生成备份")
+            return
+        try:
+            os.startfile(str(self._backup_dir))
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+
+    def _apply_model_order(self, content: str, model: str) -> tuple[str, bool]:
+        key = "MODEL_ORDER_BY_AUTH_METHOD"
+        idx = content.find(key)
+        if idx == -1:
+            return content, False
+        brace_start = content.find("{", idx)
+        if brace_start == -1:
+            return content, False
+        depth = 0
+        end = -1
+        for i in range(brace_start, len(content)):
+            if content[i] == "{":
+                depth += 1
+            elif content[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end == -1:
+            return content, False
+        block = content[brace_start:end + 1]
+        m = re.search(r"apikey\s*:\s*\[(.*?)\]", block, flags=re.S)
+        if not m:
+            return content, False
+        list_body = m.group(1)
+        items = [m2.group(2) for m2 in re.finditer(r"(['\"])(.*?)\1", list_body)]
+        quote = "\""
+        qmatch = re.search(r"(['\"])", list_body)
+        if qmatch:
+            quote = qmatch.group(1)
+        items = [i for i in items if i and i != model]
+        items.insert(0, model)
+        new_list = ",".join(f"{quote}{i}{quote}" for i in items)
+        new_block = block[:m.start(1)] + new_list + block[m.end(1):]
+        new_content = content[:brace_start] + new_block + content[end + 1:]
+        return new_content, True
+
+    def _apply_chatgpt_only(self, content: str) -> tuple[str, bool]:
+        key = "CHAT_GPT_AUTH_ONLY_MODELS"
+        idx = content.find(key)
+        if idx == -1:
+            return content, False
+        bracket_start = content.find("[", idx)
+        if bracket_start == -1:
+            return content, False
+        depth = 0
+        end = -1
+        for i in range(bracket_start, len(content)):
+            if content[i] == "[":
+                depth += 1
+            elif content[i] == "]":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end == -1:
+            return content, False
+        list_body = content[bracket_start + 1:end]
+        quote = "\""
+        qmatch = re.search(r"(['\"])", list_body)
+        if qmatch:
+            quote = qmatch.group(1)
+        new_list = f"{quote}codex-auto{quote}"
+        new_content = content[:bracket_start + 1] + new_list + content[end:]
+        return new_content, True
+
+    def _apply_fallback_guard(self, content: str) -> tuple[str, bool]:
+        if 'Ye!=="apikey"' in content:
+            return content, True
+        pattern = re.compile(r"(!lt\s*&&\s*)(!!mt\s*&&\s*CHAT_GPT_AUTH_ONLY_MODELS\.has\(normalizeModel\(mt\)\))")
+        new_content, count = pattern.subn(r"\\1Ye!==\"apikey\" && \\2", content, count=1)
+        if count > 0:
+            return new_content, True
+        anchor = "CHAT_GPT_AUTH_ONLY_MODELS.has(normalizeModel(mt))"
+        idx = content.find(anchor)
+        if idx == -1:
+            return content, False
+        window_start = max(0, idx - 200)
+        window = content[window_start:idx]
+        lt_idx = window.rfind("!lt")
+        if lt_idx == -1:
+            return content, False
+        insert_pos = window_start + lt_idx + len("!lt")
+        new_content = content[:insert_pos] + " && Ye!==\"apikey\"" + content[insert_pos:]
+        return new_content, True
+
+    def apply_patch(self) -> None:
+        model = self.model_edit.text().strip()
+        if not model:
+            message_warn(self, "提示", "请输入模型名称")
+            return
+        if not self._index_path or not self._index_path.exists():
+            message_warn(self, "提示", "未找到 index 文件")
+            return
+        try:
+            original = self._index_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+            return
+
+        backup_path = self._backup_index(self._index_path)
+
+        content, ok1 = self._apply_model_order(original, model)
+        content, ok2 = self._apply_chatgpt_only(content)
+        content, ok3 = self._apply_fallback_guard(content)
+        if not (ok1 and ok2 and ok3):
+            message_error(self, "失败", "未能定位关键片段，可能与当前插件版本不匹配")
+            return
+        try:
+            self._index_path.write_text(content, encoding="utf-8")
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+            return
+        self.status_label.setText(f"已备份并应用：{backup_path}")
+
+    def _settings_paths(self) -> List[Path]:
+        appdata = os.environ.get("APPDATA")
+        if not appdata:
+            return []
+        base = Path(appdata)
+        candidates = [
+            base / "Code" / "User" / "settings.json",
+            base / "Code - Insiders" / "User" / "settings.json",
+            base / "VSCodium" / "User" / "settings.json",
+            base / "Cursor" / "User" / "settings.json",
+        ]
+        return [p for p in candidates if p.exists()]
+
+    def _load_jsonc(self, text: str) -> dict:
+        no_block = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        no_line = re.sub(r"//.*", "", no_block)
+        try:
+            return json.loads(no_line) if no_line.strip() else {}
+        except Exception:
+            return {}
+
+    def disable_auto_update(self) -> None:
+        paths = self._settings_paths()
+        if not paths:
+            message_warn(self, "提示", "未找到 VS Code 设置文件")
+            return
+        updated = 0
+        for path in paths:
+            try:
+                raw = path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                raw = ""
+            data = self._load_jsonc(raw)
+            data["extensions.autoUpdate"] = False
+            data["extensions.autoCheckUpdates"] = False
+            try:
+                path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                updated += 1
+            except Exception:
+                continue
+        if updated:
+            self.status_label.setText(f"已更新 {updated} 个 settings.json")
+        else:
+            message_warn(self, "提示", "无法写入设置文件")
+
+
 class SettingsPage(QtWidgets.QWidget):
+
+
     def __init__(self, state: AppState) -> None:
         super().__init__()
         self.state = state
@@ -3279,6 +4512,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pages["opencode"] = OpencodeConfigPage(self.state)
         self.pages["network"] = NetworkDiagnosticsPage(self.state)
         self.pages["codex_status"] = CodexStatusPage(self.state)
+        self.pages["vscode_plugin"] = VSCodePluginPage(self.state)
+        self.pages["skills"] = SkillsPage(self.state)
         self.pages["settings"] = SettingsPage(self.state)
         self.pages["openai_status"] = OpenAIStatusPage(self.state)
         self.pages["sessions"] = SessionManagerPage(self.state)
@@ -3292,6 +4527,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._add_nav_button(nav, "opencode 配置", "opencode")
         self._add_nav_button(nav, "多账号切换", "account")
         self._add_nav_button(nav, "Codex会话管理", "sessions")
+        self._add_nav_button(nav, "Skill 管理", "skills")
+        self._add_nav_button(nav, "Codex VS Code配置", "vscode_plugin")
         self._add_nav_button(nav, "中转站接口", "network")
         self._add_nav_button(nav, "OpenAI官网状态", "openai_status")
         self._add_nav_button(nav, "检查更新", "settings")
