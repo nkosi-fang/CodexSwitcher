@@ -57,7 +57,7 @@ from codex_switcher import (
 
 
 APP_TITLE = "Codex Switcher"
-APP_VERSION = "2.0.3"
+APP_VERSION = "2.0.4"
 APP_REPO = "nkosi-fang/CodexSwitcher"
 
 CODING_COMPONENTS = [
@@ -3892,7 +3892,7 @@ class SessionManagerPage(QtWidgets.QWidget):
             row.setData(QtCore.Qt.UserRole, item)
             self.list_widget.addItem(row)
             shown += 1
-        self.count_label.setText(f"共 {shown} 条<b>【ⓘ 提示：鼠标右键可打开文件夹或继续该会话（Codex CLI）】</b>")
+        self.count_label.setText(f"共 {shown} 条<b>【ⓘ 提示：鼠标右键可打开文件夹 / 继续该会话（Codex CLI）/ VS Code打开该目录 / WebView 修复】</b>")
         if shown == 0 and show_empty:
             self.detail_text.setPlainText("无匹配会话。")
 
@@ -4136,11 +4136,17 @@ class SessionManagerPage(QtWidgets.QWidget):
         menu = QtWidgets.QMenu(self)
         open_folder = menu.addAction("打开文件夹")
         resume_session = menu.addAction("继续该会话（Codex CLI）")
+        resume_vscode = menu.addAction("VS Code打开该目录")
+        repair_webview = menu.addAction("WebView 修复")
         action = menu.exec(self.list_widget.mapToGlobal(pos))
         if action == open_folder:
             self._open_session_folder(item)
         elif action == resume_session:
             self._resume_session(item)
+        elif action == resume_vscode:
+            self._resume_session_vscode(item)
+        elif action == repair_webview:
+            self._resume_session_vscode(item, fix_webview=True)
 
     def _open_session_folder(self, item: QtWidgets.QListWidgetItem) -> None:
         meta = item.data(QtCore.Qt.UserRole)
@@ -4203,6 +4209,220 @@ class SessionManagerPage(QtWidgets.QWidget):
                 subprocess.Popen(cmd, env=env, cwd=run_cwd)
         except Exception as exc:
             message_error(self, "失败", str(exc))
+
+    def _resume_session_vscode(self, item: QtWidgets.QListWidgetItem, fix_webview: bool = False) -> None:
+        meta = item.data(QtCore.Qt.UserRole)
+        if not isinstance(meta, dict):
+            return
+        cwd = meta.get("cwd", "")
+        if not cwd or not os.path.isdir(cwd):
+            message_warn(self, "提示", "未找到会话工作目录，无法在 VS Code 中继续")
+            return
+        sid = meta.get("id", "")
+        if not sid:
+            message_warn(self, "提示", "未找到会话 ID，无法继续")
+            return
+        if fix_webview:
+            def worker() -> None:
+                self._kill_vscode_processes()
+                self._clear_vscode_cache(self._get_saved_vscode_install_dir())
+                run_in_ui(lambda: self._launch_vscode_for_session(cwd))
+            threading.Thread(target=worker, daemon=True).start()
+            return
+        self._launch_vscode_for_session(cwd)
+
+    def _launch_vscode_for_session(self, cwd: str) -> None:
+        code_cli = self._find_vscode_cli()
+        args = None
+        if code_cli and self._vscode_supports_command(code_cli):
+            args = [code_cli, "-r", cwd, "--command", "chatgpt.openSidebar"]
+        else:
+            if code_cli:
+                args = [code_cli, "-r", cwd]
+            else:
+                code_exe = self._find_vscode_exe()
+                if code_exe:
+                    args = [code_exe, cwd]
+            self._ensure_open_on_startup(Path(cwd))
+        if not args:
+            message_warn(self, "提示", "未找到 VS Code，可先安装或在 PATH 中启用 code 命令")
+            return
+        try:
+            subprocess.Popen(args)
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+            return
+        message_info(
+            self,
+            "提示",
+            "官方Codex vscode插件还未支持通过会话ID继续会话的接口，只会打开该会话所在工作目录。\n\n如需查看会话记录，请通过右侧会话详情，或在CODEX CLI续聊。",
+        )
+
+    def _get_saved_vscode_install_dir(self) -> Optional[Path]:
+        saved = self.state.vscode_install_dir if isinstance(self.state.vscode_install_dir, str) else None
+        if saved:
+            path = Path(saved)
+            if path.exists():
+                return path
+        return None
+
+    def _find_vscode_cli(self) -> Optional[str]:
+        for name in ("code", "code.cmd", "code.exe", "code-insiders", "code-insiders.cmd"):
+            path = shutil.which(name)
+            if path:
+                return path
+        return None
+
+    def _find_vscode_exe_in_dir(self, root: Path) -> Optional[str]:
+        candidates = [
+            root / "Code.exe",
+            root / "Code - Insiders.exe",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+        return None
+
+    def _find_vscode_exe(self) -> Optional[str]:
+        saved = self.state.vscode_install_dir if isinstance(self.state.vscode_install_dir, str) else None
+        if saved:
+            root = Path(saved)
+            if root.exists():
+                exe = self._find_vscode_exe_in_dir(root)
+                if exe:
+                    return exe
+        candidates = []
+        local = os.environ.get("LOCALAPPDATA")
+        program = os.environ.get("ProgramFiles") or os.environ.get("PROGRAMFILES")
+        program_x86 = os.environ.get("ProgramFiles(x86)") or os.environ.get("PROGRAMFILES(X86)")
+        if local:
+            candidates.append(Path(local) / "Programs" / "Microsoft VS Code" / "Code.exe")
+            candidates.append(Path(local) / "Programs" / "Microsoft VS Code Insiders" / "Code - Insiders.exe")
+        if program:
+            candidates.append(Path(program) / "Microsoft VS Code" / "Code.exe")
+            candidates.append(Path(program) / "Microsoft VS Code Insiders" / "Code - Insiders.exe")
+        if program_x86:
+            candidates.append(Path(program_x86) / "Microsoft VS Code" / "Code.exe")
+            candidates.append(Path(program_x86) / "Microsoft VS Code Insiders" / "Code - Insiders.exe")
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+        return None
+
+    def _vscode_supports_command(self, code_cli: str) -> bool:
+        try:
+            creationflags = 0x08000000 if os.name == "nt" else 0
+            proc = subprocess.run([code_cli, "--help"], capture_output=True, text=True, timeout=3, creationflags=creationflags)
+        except Exception:
+            return False
+        output = (proc.stdout or "") + (proc.stderr or "")
+        return "--command" in output
+
+    def _load_jsonc(self, text: str) -> dict:
+        no_block = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        no_line = re.sub(r"//.*", "", no_block)
+        try:
+            return json.loads(no_line) if no_line.strip() else {}
+        except Exception:
+            return {}
+
+    def _ensure_open_on_startup(self, workspace: Path) -> bool:
+        settings_path = workspace / ".vscode" / "settings.json"
+        try:
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            raw = settings_path.read_text(encoding="utf-8", errors="ignore") if settings_path.exists() else ""
+            data = self._load_jsonc(raw)
+            data["chatgpt.openOnStartup"] = True
+            settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            return True
+        except Exception:
+            return False
+
+    def _kill_vscode_processes(self) -> None:
+        targets = [
+            "Code.exe",
+            "Code - Insiders.exe",
+            "msedgewebview2.exe",
+            "ServiceHub.RoslynCodeAnalysisService.exe",
+            "ServiceHub.Host.Node.x64.exe",
+            "ServiceHub.TestWindowStoreHost.exe",
+        ]
+        for name in targets:
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/IM", name], capture_output=True, text=True)
+            except Exception:
+                continue
+
+    def _clear_vscode_cache(self, install_dir: Optional[Path] = None) -> None:
+        appdata = os.environ.get("APPDATA")
+        local = os.environ.get("LOCALAPPDATA")
+        paths = []
+        channel = None
+        portable_user_data = None
+        if install_dir:
+            if (install_dir / "Code - Insiders.exe").is_file():
+                channel = "insiders"
+            elif (install_dir / "Code.exe").is_file():
+                channel = "stable"
+            portable_root = install_dir / "data" / "user-data"
+            if portable_root.is_dir():
+                portable_user_data = portable_root
+        if portable_user_data:
+            base = portable_user_data
+            paths += [
+                base / "WebView",
+                base / "CachedData",
+                base / "Cache",
+                base / "GPUCache",
+                base / "Local Storage",
+                base / "Service Worker" / "CacheStorage",
+                base / "Service Worker" / "ScriptCache",
+                base / "User" / "workspaceStorage",
+                base / "User" / "globalStorage",
+            ]
+        else:
+            if channel == "stable":
+                names = ["Code"]
+            elif channel == "insiders":
+                names = ["Code - Insiders"]
+            else:
+                names = ["Code", "Code - Insiders"]
+            if appdata:
+                base = Path(appdata)
+                for name in names:
+                    root = base / name
+                    paths += [
+                        root / "WebView",
+                        root / "CachedData",
+                        root / "Cache",
+                        root / "GPUCache",
+                        root / "Local Storage",
+                        root / "Service Worker" / "CacheStorage",
+                        root / "Service Worker" / "ScriptCache",
+                    ]
+            if local:
+                base = Path(local) / "Microsoft"
+                if channel == "stable":
+                    local_names = ["Code"]
+                elif channel == "insiders":
+                    local_names = ["Code - Insiders"]
+                else:
+                    local_names = ["Code", "Code - Insiders"]
+                for name in local_names:
+                    root = base / name
+                    paths += [
+                        root / "User" / "workspaceStorage",
+                        root / "User" / "globalStorage",
+                    ]
+                paths.append(Path(local) / "Temp" / "Code")
+        for p in paths:
+            try:
+                if p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+                elif p.exists():
+                    p.unlink(missing_ok=True)
+            except Exception:
+                continue
 
     def export_json(self) -> None:
         item = self.list_widget.currentItem()
@@ -4480,7 +4700,6 @@ class OpenAIStatusPage(QtWidgets.QWidget):
 
         return "<br>".join(html_lines).strip()
 
-
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -4528,7 +4747,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._add_nav_button(nav, "多账号切换", "account")
         self._add_nav_button(nav, "Codex会话管理", "sessions")
         self._add_nav_button(nav, "Skill 管理", "skills")
-        self._add_nav_button(nav, "Codex VS Code配置", "vscode_plugin")
+        self._add_nav_button(nav, "VScode codex", "vscode_plugin")
         self._add_nav_button(nav, "中转站接口", "network")
         self._add_nav_button(nav, "OpenAI官网状态", "openai_status")
         self._add_nav_button(nav, "检查更新", "settings")

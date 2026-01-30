@@ -1,24 +1,68 @@
 # Release 模板
 
 ## 标题
-v2.0.3 (Windows)
+v2.0.4 (Windows)
 
 ## 下载
-- CodexSwitcher_v2.0.3.exe
+- CodexSwitcher_v2.0.4.exe
 
 ## 校验（可选）
-- SHA256: 16F92BEAD560AEDD7D771C27882DDD690A30A695BE1191544381B36A3783BB6E
+- SHA256: EA329495B1B9CE6EB23510FECFFD606D40106118D9F5F44636A545F4759847ED
 
 ## 首次运行提示
 - 如首次运行出现 Windows SmartScreen 提示，这是因为未进行代码签名；请确认下载来源为 GitHub Releases，并核对 SHA256 后再运行。
 
 ## 变更
-- 新增「Codex会话管理」页：集中管理会话索引、详情、导出（JSON/Markdown）与清理，便于查找与归档。
-- 归档视图优化：在 user/assistant/系统提示/开发者说明/工具响应之间自动插入分割线，阅读更清晰。
-- 会话检索增强：支持 OR/AND 多关键词、history 优先 + 深度搜索、进度与取消，可检索本地全部 Codex 会话。
-- 会话列表右键：支持“继续该会话（Codex CLI）”，在 PowerShell 终端快速续聊。
-- OpenAI官网状态：刷新后同步官方服务状态，或一键打开 status.openai.com。
+1) Skill 管理功能完善
 
+  - 识别并读取 ~/.codex/skills 与 ~/.codex/skills/user 子目录
+  - 解析 SKILL.md 中的 name/description 用于展示
+  - 系统技能只读保护
+  - 增加“备份技能 / 打开备份目录 / 打开技能目录”
+  - 备份保留策略（保留最近 5 份）
+
+  2) Codex 状态页增强
+
+  - 移除“诊断信息”模块显示
+  - 官方版本卡片新增“一键更新”
+  - 新增“一键启动”区：
+      - 选择工作区
+      - 一键启动 Codex CLI
+      - 一键启动 VS Code
+  - VS Code 启动后自动打开 Codex 侧边栏（能用 --command 时）
+  - VS Code 工作区启动失败时改为写入 chatgpt.openOnStartup
+
+  3) VS Code 安装目录管理
+
+  - 可选择并保存 VS Code 安装目录
+  - 下次启动/修复优先使用该目录
+  - 便携版支持（检测 data/user-data）
+
+  4) WebView 错误修复功能
+
+  - 新增“WebView错误修改”按钮
+  - 自动结束 VS Code / WebView 相关进程
+  - 清理 WebView 与缓存目录
+  - 修复后自动重启 VS Code
+
+  5) Codex VS Code 插件配置页
+
+  - 插件扫描、版本展示、最新版本（Marketplace）
+  - index 文件路径自动换行显示
+  - 提示文案优化（重启提示、原理说明等）
+  - 导航名称已改为 “VScode codex”
+
+  6) 会话管理增强
+
+  - 右键菜单新增：
+      - “VS Code打开该目录”
+      - 只打开侧边栏 + 当前会话目录
+      - 弹窗说明插件暂不支持通过 session_id 继续
+  - 提示文案同步更新
+
+  - 适配 .cmd/.bat 启动方式（cmd /k）
+  - 支持 npm prefix -g 路径探测
+  - 避免 “找不到文件” 报错
 ## 已知问题
 
 - codex cli最新版本0.92可能会出现沙盒相关警告，请自行手动在config.toml中添加“suppress_unstable_features_warning = true”。添加位置如截图：

@@ -2,21 +2,16 @@
 
 ## 界面截图
 ![界面截图](docs/images/ui1.png)
-![界面截图2](docs/images/ui2.png)
 
 ## 完整功能
+- **Codex CLI 状态页**：移除“诊断信息”；新增一键更新、一键启动 Codex CLI / VS Code、一键修复常见 WebView 视图错误
 - **Codex CLI 生态配置**：检测本机 codex 路径/版本，并提供 config.toml 与 opencode 配置管理
 - **多账号切换**：管理多个账号/密钥/中转站地址，一键切换生效
-- **中转站接口诊断**：检测 Base URL 连通性、接口可用性、模型/embedding/moderation 探测
-- **Codex 会话管理**：
-  - 会话索引：显示时间、目录、模型、分支等
-  - 详情查看：按角色分隔展示对话内容
-  - 高级检索：OR/AND、多关键词、history 优先 + 深度搜索、进度与取消
-  - 导出：JSON / Markdown
-  - 清理：按日期/大小批量清理
-  - 右键：打开会话文件夹、继续该会话（Codex CLI）
-- **OpenAI 官网状态**：同步展示 status.openai.com 组件状态，并按异常类型着色
-
+- **Codex 会话管理**：索引/详情/高级检索/导出/清理；右键打开文件夹、继续 CLI 会话、VS Code 打开会话目录、WebView 修复
+- **Skill 管理**：支持扫描识别本地 Codex skill，查看、导入、备份、删除
+- **VS Code 插件增强**：支持一键增加 OAI 新模型，免去手动修改 DEFAULT_MODEL_ORDER
+- **中转站接口诊断**：连通性、接口可用性、模型/embedding/moderation 探测
+- **OpenAI 官网状态**：同步展示 status.openai.com 组件状态并分类着色
 ## 使用说明
 - 双击运行 `CodexSwitcher_v2.exe`
 - 在「多账号切换」中添加/管理账号
