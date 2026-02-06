@@ -80,42 +80,74 @@ def update_config_base_url(new_url: str) -> None:
         text = ""
     line_ending = "\r\n" if "\r\n" in text else "\n"
     lines = text.splitlines()
-    if not lines:
-        lines = [
-            'model_provider = "codexzh"',
-            "",
-            "[model_providers.codexzh]",
-            f'base_url = "{new_url}"',
-        ]
-        CONFIG_PATH.write_text(line_ending.join(lines) + line_ending, encoding="utf-8")
-        return
 
-    section_start = None
-    in_target_section = False
-    updated = False
+    section_re = re.compile(r"^\s*\[([^\]]+)\]\s*$")
+    model_provider_re = re.compile(r"^\s*model_provider\s*=\s*[\"']([^\"']+)[\"']")
+    base_url_re = re.compile(r"^\s*base_url\s*=")
+
+    active_provider = None
+    current_section = None
+    provider_sections: Dict[str, int] = {}
+    provider_base_url_lines: Dict[str, int] = {}
+    provider_order: List[str] = []
 
     for idx, line in enumerate(lines):
         stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            section_name = stripped[1:-1].strip().strip("'\"")
-            in_target_section = section_name == "model_providers.codexzh"
-            if in_target_section:
-                section_start = idx
+        section_match = section_re.match(stripped)
+        if section_match:
+            current_section = section_match.group(1).strip().strip("'\"")
+            if current_section.startswith("model_providers."):
+                provider_name = current_section[len("model_providers.") :]
+                if provider_name not in provider_sections:
+                    provider_sections[provider_name] = idx
+                    provider_order.append(provider_name)
             continue
-        if in_target_section and stripped.startswith("base_url"):
-            indent = line[: len(line) - len(line.lstrip())]
-            lines[idx] = f'{indent}base_url = "{new_url}"'
-            updated = True
-            break
 
-    if not updated:
-        if section_start is not None:
-            insert_at = section_start + 1
-            lines.insert(insert_at, f'base_url = "{new_url}"')
+        if current_section is None and active_provider is None:
+            provider_match = model_provider_re.match(stripped)
+            if provider_match:
+                active_provider = provider_match.group(1).strip()
+
+        if not current_section or not current_section.startswith("model_providers."):
+            continue
+        provider_name = current_section[len("model_providers.") :]
+        if provider_name not in provider_base_url_lines and base_url_re.match(stripped):
+            provider_base_url_lines[provider_name] = idx
+
+    target_provider = None
+    if active_provider and active_provider in provider_sections:
+        target_provider = active_provider
+    elif provider_base_url_lines:
+        target_provider = next(iter(provider_base_url_lines))
+    elif provider_order:
+        target_provider = provider_order[0]
+
+    if not lines:
+        fallback_provider = active_provider or "codexzh"
+        lines = [
+            f'model_provider = "{fallback_provider}"',
+            "",
+            f"[model_providers.{fallback_provider}]",
+            f'base_url = "{new_url}"',
+        ]
+    elif target_provider:
+        base_url_idx = provider_base_url_lines.get(target_provider)
+        if base_url_idx is not None:
+            original_line = lines[base_url_idx]
+            indent = original_line[: len(original_line) - len(original_line.lstrip())]
+            lines[base_url_idx] = f'{indent}base_url = "{new_url}"'
         else:
-            if lines and lines[-1].strip():
-                lines.append("")
-            lines.extend(["[model_providers.codexzh]", f'base_url = "{new_url}"'])
+            section_idx = provider_sections[target_provider]
+            lines.insert(section_idx + 1, f'base_url = "{new_url}"')
+    else:
+        fallback_provider = active_provider or "codexzh"
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.extend([
+            f"[model_providers.{fallback_provider}]",
+            f'base_url = "{new_url}"',
+        ])
+
     text_out = line_ending.join(lines)
     if not text_out.endswith(line_ending):
         text_out += line_ending
@@ -125,7 +157,6 @@ def update_config_base_url(new_url: str) -> None:
         raise PermissionError(
             f"无法写入 {CONFIG_PATH}，请确认文件未被其他程序占用并具有写入权限。"
         ) from err
-
 
 def update_auth_key(api_key: str) -> None:
     if AUTH_PATH.exists():

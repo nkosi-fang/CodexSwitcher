@@ -17,10 +17,10 @@ import html
 from ctypes import wintypes
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 from urllib import request as urllib_request
 from urllib import error as urllib_error
-from urllib.parse import urlparse
+from urllib.parse import quote as urlquote, urlparse
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -57,7 +57,7 @@ from codex_switcher import (
 
 
 APP_TITLE = "Codex Switcher"
-APP_VERSION = "2.0.4"
+APP_VERSION = "2.0.5"
 APP_REPO = "nkosi-fang/CodexSwitcher"
 
 CODING_COMPONENTS = [
@@ -126,6 +126,57 @@ def apply_white_shadow(widget: QtWidgets.QWidget) -> None:
 
 def message_error(parent: QtWidgets.QWidget, title: str, text: str) -> None:
     QtWidgets.QMessageBox.critical(parent, title, text)
+
+
+class NavBadgeButton(QtWidgets.QPushButton):
+    def __init__(self, label: str) -> None:
+        super().__init__(label)
+        self._badge = QtWidgets.QLabel("", self)
+        self._badge.setAlignment(QtCore.Qt.AlignCenter)
+        self._badge.setStyleSheet(
+            "background:#ff4d4f;color:white;border-radius:8px;font-size:10px;font-weight:700;"
+        )
+        self._badge.setFixedSize(16, 16)
+        self._badge.hide()
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._position_badge()
+
+    def _position_badge(self) -> None:
+        w = self._badge.width()
+        self._badge.move(max(0, self.width() - w - 4), 2)
+
+    def set_badge_count(self, count: int) -> None:
+        if count <= 0:
+            self._badge.hide()
+            return
+        if count > 99:
+            text = "99+"
+        else:
+            text = str(count)
+        width = 16 if len(text) == 1 else 22
+        self._badge.setFixedSize(width, 16)
+        self._badge.setText(text)
+        self._badge.show()
+        self._position_badge()
+
+
+def _popen_hidden_cmd_on_windows(args: List[str]):
+    popen_kwargs: Dict[str, object] = {}
+    if os.name == "nt" and args:
+        executable = str(args[0]).lower()
+        if executable.endswith(".cmd") or executable.endswith(".bat"):
+            if hasattr(subprocess, "CREATE_NO_WINDOW"):
+                popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            try:
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
+                popen_kwargs["startupinfo"] = startupinfo
+            except Exception:
+                pass
+    return subprocess.Popen(args, **popen_kwargs)
 
 
 def log_diagnosis(title: str, detail: str) -> None:
@@ -237,6 +288,106 @@ def probe_endpoints(
         payload = {"model": model, "input": "hello"}
         return post_json(url, headers, payload, timeout=timeout)
 
+    def parse_json_payload(body: str):
+        text = body.strip() if isinstance(body, str) else ""
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+        parsed_line_payload = None
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                data = json.loads(payload)
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                parsed_line_payload = data
+        if parsed_line_payload is not None:
+            return parsed_line_payload
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            snippet = text[start : end + 1]
+            try:
+                data = json.loads(snippet)
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+        return None
+
+    def validate_success_body(endpoint: str, body: str) -> tuple[bool, str]:
+        text = body.strip() if isinstance(body, str) else ""
+        if not text:
+            return False, "响应体为空"
+
+        data = parse_json_payload(text)
+        if data is None:
+            return False, "响应体不是有效 JSON"
+
+        if isinstance(data, dict) and "error" in data:
+            error_obj = data.get("error")
+            if error_obj not in (None, "", {}, []):
+                return False, "响应中包含 error 字段"
+
+        if endpoint == "/models":
+            if not isinstance(data, dict):
+                return False, "响应结构不是 JSON 对象"
+            items = data.get("data")
+            if isinstance(items, list):
+                return True, ""
+            return False, "缺少 data 列表"
+
+        if endpoint == "/chat/completions" or endpoint == "/completions":
+            if not isinstance(data, dict):
+                return False, "响应结构不是 JSON 对象"
+            choices = data.get("choices")
+            if isinstance(choices, list):
+                return True, ""
+            if isinstance(data.get("id"), str) and isinstance(data.get("model"), str):
+                return True, ""
+            return False, "缺少 choices 或 id/model"
+
+        if endpoint == "/responses":
+            if not isinstance(data, dict):
+                return False, "响应结构不是 JSON 对象"
+            output = data.get("output")
+            if isinstance(output, list):
+                return True, ""
+            output_text = data.get("output_text")
+            if isinstance(output_text, str) and output_text.strip():
+                return True, ""
+            keys = ("id", "object", "model", "status", "response")
+            if any(k in data for k in keys):
+                return True, ""
+            return False, "缺少 output/output_text 或关键字段"
+
+        if endpoint == "/embeddings":
+            if not isinstance(data, dict):
+                return False, "响应结构不是 JSON 对象"
+            items = data.get("data")
+            if isinstance(items, list):
+                return True, ""
+            return False, "缺少 data 列表"
+
+        if endpoint == "/moderations":
+            if not isinstance(data, dict):
+                return False, "响应结构不是 JSON 对象"
+            items = data.get("results")
+            if isinstance(items, list):
+                return True, ""
+            return False, "缺少 results 列表"
+
+        return True, ""
+
     model_supported: Optional[bool] = None
     model_source = ""
     model_in_list: Optional[bool] = None
@@ -244,9 +395,8 @@ def probe_endpoints(
     response_model_source = ""
 
     def parse_models(body: str) -> set[str]:
-        try:
-            data = json.loads(body)
-        except Exception:
+        data = parse_json_payload(body)
+        if data is None:
             return set()
         if isinstance(data, dict):
             items = data.get("data")
@@ -261,14 +411,18 @@ def probe_endpoints(
         return set()
 
     def extract_response_model(body: str) -> str:
-        try:
-            data = json.loads(body)
-        except Exception:
+        data = parse_json_payload(body)
+        if data is None:
             return ""
         if isinstance(data, dict):
             model_value = data.get("model")
             if isinstance(model_value, str):
                 return model_value
+            response_value = data.get("response")
+            if isinstance(response_value, dict):
+                nested_model = response_value.get("model")
+                if isinstance(nested_model, str):
+                    return nested_model
         return ""
 
     def is_model_error(body: str) -> bool:
@@ -350,6 +504,11 @@ def probe_endpoints(
             results.append((label, ep, url, None, f"SKIP: {skip_endpoints[ep]}"))
             continue
         ok, body = request_endpoint(ep, url)
+        if ok:
+            content_ok, reason = validate_success_body(ep, body)
+            if not content_ok:
+                ok = False
+                body = f"HTTP 200 但响应内容无效：{reason}"
         results.append((label, ep, url, ok, body))
         if ok and ep in ("/responses", "/chat/completions", "/completions") and not success_endpoint:
             success_endpoint = label
@@ -706,19 +865,34 @@ class AccountPage(QtWidgets.QWidget):
         self.org_edit.setText(account.get("org_id", ""))
         self._set_account_type_from_account(account)
 
-    def apply_selected(self) -> None:
+    def _find_account_row(self, name: str, is_team: bool) -> int:
+        team_flag = "1" if is_team else "0"
+        for idx, item in enumerate(self.account_items):
+            if item.get("name", "") == name and item.get("is_team", "0") == team_flag:
+                return idx
+        return -1
+
+    def _apply_selected(self, show_message: bool = True) -> bool:
         row = self.list_widget.currentRow()
         if row < 0 or row >= len(self.account_items):
             message_warn(self, "提示", "请选择账号")
-            return
+            return False
         account = self.account_items[row]
         apply_account_config(self.state.store, account)
         apply_env_for_account(account)
         set_active_account(self.state.store, account)
         self.state.active_account = account
         self.refresh()
+        selected_row = self._find_account_row(account.get("name", ""), account.get("is_team") == "1")
+        if selected_row >= 0:
+            self.list_widget.setCurrentRow(selected_row)
         self.refresh_pages()
-        message_info(self, "完成", "账号已应用")
+        if show_message:
+            message_info(self, "完成", "账号已应用")
+        return True
+
+    def apply_selected(self) -> None:
+        self._apply_selected(show_message=True)
 
     def save_account(self) -> None:
         name = self.name_edit.text().strip()
@@ -735,7 +909,12 @@ class AccountPage(QtWidgets.QWidget):
             return
         upsert_account(self.state.store, name, base_url, api_key, org_id, is_team, account_type)
         self.refresh()
-        message_info(self, "完成", "账号已保存")
+        row = self._find_account_row(name, is_team)
+        if row < 0:
+            message_info(self, "完成", "账号已保存")
+            return
+        self.list_widget.setCurrentRow(row)
+        self._apply_selected(show_message=True)
 
     def delete_selected(self) -> None:
         row = self.list_widget.currentRow()
@@ -1240,21 +1419,55 @@ class CodexStatusPage(QtWidgets.QWidget):
         apply_white_shadow(launch_group)
         launch_layout = QtWidgets.QVBoxLayout(launch_group)
         vscode_row = QtWidgets.QHBoxLayout()
-        self.vscode_path_label = QtWidgets.QLabel("VS Code 安装目录：未设置（将使用默认路径）")
-        self.vscode_path_label.setWordWrap(True)
-        self.vscode_path_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        self.pick_vscode_btn = QtWidgets.QPushButton("选择 VS Code 安装目录")
+        vscode_caption = QtWidgets.QLabel("VS Code 安装目录")
+        self.vscode_path_edit = QtWidgets.QLineEdit()
+        self.vscode_path_edit.setReadOnly(True)
+        self.vscode_path_edit.setPlaceholderText("未选择将使用vscode在win中的默认安装路径")
+        self.vscode_path_edit.setText("未选择将使用vscode在win中的默认安装路径")
+        self.vscode_path_edit.setClearButtonEnabled(False)
+        self.vscode_path_edit.setMinimumHeight(32)
+        self.vscode_path_edit.setStyleSheet(
+            "QLineEdit {"
+            "border: 1px solid #8ea6ff;"
+            "border-radius: 6px;"
+            "padding: 4px 8px;"
+            "background: #ffffff;"
+            "}"
+            "QLineEdit:read-only {"
+            "background: #f7f9ff;"
+            "}"
+        )
+        self.vscode_path_edit.setToolTip("未选择将使用vscode在win中的默认安装路径")
+        self.pick_vscode_btn = QtWidgets.QPushButton("选择目录")
         self.pick_vscode_btn.clicked.connect(self.pick_vscode_install_dir)
-        vscode_row.addWidget(self.vscode_path_label, 1)
+        vscode_row.addWidget(vscode_caption)
+        vscode_row.addWidget(self.vscode_path_edit, 1)
         vscode_row.addWidget(self.pick_vscode_btn)
         launch_layout.addLayout(vscode_row)
         path_row = QtWidgets.QHBoxLayout()
-        self.workspace_label = QtWidgets.QLabel("工作区：未选择")
-        self.workspace_label.setWordWrap(True)
-        self.workspace_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        self.pick_workspace_btn = QtWidgets.QPushButton("选择工作区")
+        workspace_caption = QtWidgets.QLabel("\u5de5\u4f5c\u533a")
+        self.workspace_path_edit = QtWidgets.QLineEdit()
+        self.workspace_path_edit.setReadOnly(True)
+        self.workspace_path_edit.setPlaceholderText("\u672a\u9009\u62e9\u5de5\u4f5c\u533a")
+        self.workspace_path_edit.setText("\u672a\u9009\u62e9\u5de5\u4f5c\u533a")
+        self.workspace_path_edit.setClearButtonEnabled(False)
+        self.workspace_path_edit.setMinimumHeight(32)
+        self.workspace_path_edit.setStyleSheet(
+            "QLineEdit {"
+            "border: 1px solid #8ea6ff;"
+            "border-radius: 6px;"
+            "padding: 4px 8px;"
+            "background: #ffffff;"
+            "}"
+            "QLineEdit:read-only {"
+            "background: #f7f9ff;"
+            "}"
+        )
+        self.workspace_path_edit.setToolTip("\u672a\u9009\u62e9\u5de5\u4f5c\u533a")
+        self.pick_workspace_btn = QtWidgets.QPushButton("\u9009\u62e9\u5de5\u4f5c\u533a")
         self.pick_workspace_btn.clicked.connect(self.pick_workspace)
-        path_row.addWidget(self.workspace_label, 1)
+        path_row.addWidget(workspace_caption)
+        path_row.addWidget(self.workspace_path_edit, 1)
         path_row.addWidget(self.pick_workspace_btn)
         launch_layout.addLayout(path_row)
         launch_btn_row = QtWidgets.QHBoxLayout()
@@ -1401,9 +1614,12 @@ class CodexStatusPage(QtWidgets.QWidget):
 
     def _refresh_vscode_install_label(self) -> None:
         if self._vscode_install_dir and self._vscode_install_dir.exists():
-            self.vscode_path_label.setText(f"VS Code 安装目录：{self._vscode_install_dir}")
+            self.vscode_path_edit.setText(str(self._vscode_install_dir))
+            self.vscode_path_edit.setToolTip(str(self._vscode_install_dir))
         else:
-            self.vscode_path_label.setText("VS Code 安装目录：未设置（将使用默认路径）")
+            default_path_hint = "未选择将使用vscode在win中的默认安装路径"
+            self.vscode_path_edit.setText(default_path_hint)
+            self.vscode_path_edit.setToolTip(default_path_hint)
 
     def _find_vscode_exe_in_dir(self, root: Path) -> Optional[str]:
         candidates = [
@@ -1424,7 +1640,8 @@ class CodexStatusPage(QtWidgets.QWidget):
             message_warn(self, "提示", "选择的目录无效")
             return
         self._workspace_dir = path
-        self.workspace_label.setText(f"工作区：{path}")
+        self.workspace_path_edit.setText(str(path))
+        self.workspace_path_edit.setToolTip(str(path))
 
     def _ensure_workspace(self) -> Optional[Path]:
         if not self._workspace_dir:
@@ -1475,7 +1692,7 @@ class CodexStatusPage(QtWidgets.QWidget):
             message_warn(self, "提示", "未找到 VS Code，可先安装或在 PATH 中启用 code 命令")
             return
         try:
-            subprocess.Popen(args)
+            _popen_hidden_cmd_on_windows(args)
         except Exception as exc:
             message_error(self, "失败", str(exc))
             return
@@ -2886,6 +3103,7 @@ class VSCodePluginPage(QtWidgets.QWidget):
         super().__init__()
         self.state = state
         self.extension_items: List[Dict[str, object]] = []
+        self._marketplace_meta: Optional[Dict[str, object]] = None
         self._index_path: Optional[Path] = None
         self._backup_dir: Optional[Path] = None
 
@@ -2934,8 +3152,8 @@ class VSCodePluginPage(QtWidgets.QWidget):
         apply_white_shadow(model_group)
         model_layout = QtWidgets.QFormLayout(model_group)
         self.model_edit = QtWidgets.QLineEdit()
-        self.model_edit.setPlaceholderText("gpt-5.2-codex")
-        self.model_edit.setText("gpt-5.2-codex")
+        self.model_edit.setPlaceholderText("gpt-5.3-codex")
+        self.model_edit.setText("gpt-5.3-codex")
         self.apply_btn = QtWidgets.QPushButton("备份并应用")
         self.apply_btn.clicked.connect(self.apply_patch)
         self.open_backup_btn = QtWidgets.QPushButton("打开备份目录")
@@ -2955,7 +3173,7 @@ class VSCodePluginPage(QtWidgets.QWidget):
             '<span style="color:#000;font-weight:700;">修改后请重启 VS Code 或插件。</span><br>'
             '<span style="color:#666;">原理：工具会把你输入的模型加入可用模型列表，并放宽仅 ChatGPT 登录的限制，让 API Key 也能选到该模型。</span>'
             '<ul style="margin:6px 0 0 18px; padding:0; color:#666;">'
-            '<li>“最新版本”来自 Marketplace，若离线会显示“获取失败”。</li>'
+            '<li>\u201c\u6700\u65b0\u7248\u672c\u201d\u6765\u81ea Marketplace\uff0c\u4f1a\u540c\u65f6\u663e\u793a\u7a33\u5b9a\u7248/\u9884\u89c8\u7248\uff1b\u672c\u5730\u7248\u672c\u4f1a\u7ed3\u5408\u8fdc\u7a0b\u7ed3\u679c\u6807\u6ce8\u6e20\u9053\u3002</li>'
             '<li>“恢复默认设置”会恢复最近一次备份（保留原逻辑）。</li>'
             '</ul>'
         )
@@ -2976,25 +3194,69 @@ class VSCodePluginPage(QtWidgets.QWidget):
         self.refresh_extensions()
 
     def _extension_roots(self) -> List[Path]:
+        homes: List[Path] = []
         home = Path.home()
-        roots = [
-            home / ".vscode" / "extensions",
-            home / ".vscode-insiders" / "extensions",
-            home / ".vscode-oss" / "extensions",
-            home / ".cursor" / "extensions",
-        ]
-        return [p for p in roots if p.exists()]
+        homes.append(home)
+        userprofile = os.environ.get("USERPROFILE")
+        if userprofile:
+            homes.append(Path(userprofile))
+        homedrive = os.environ.get("HOMEDRIVE")
+        homepath = os.environ.get("HOMEPATH")
+        if homedrive and homepath:
+            homes.append(Path(f"{homedrive}{homepath}"))
+
+        roots: List[Path] = []
+        for base in homes:
+            roots.extend(
+                [
+                    base / ".vscode" / "extensions",
+                    base / ".vscode-insiders" / "extensions",
+                    base / ".vscode-oss" / "extensions",
+                    base / ".cursor" / "extensions",
+                ]
+            )
+
+        custom_ext = os.environ.get("VSCODE_EXTENSIONS")
+        if custom_ext:
+            roots.append(Path(custom_ext))
+
+        if isinstance(self.state.vscode_install_dir, str) and self.state.vscode_install_dir:
+            install_dir = Path(self.state.vscode_install_dir)
+            roots.append(install_dir / "resources" / "app" / "extensions")
+
+        uniq: List[Path] = []
+        seen: set[str] = set()
+        for root in roots:
+            key = str(root).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            if root.exists() and root.is_dir():
+                uniq.append(root)
+        return uniq
 
     def _find_extensions(self) -> List[Path]:
         results: List[Path] = []
         for root in self._extension_roots():
-            for entry in root.iterdir():
+            try:
+                entries = list(root.iterdir())
+            except Exception:
+                continue
+            for entry in entries:
                 if not entry.is_dir():
                     continue
                 name = entry.name.lower()
                 if name.startswith("openai.chatgpt"):
                     results.append(entry)
-        return results
+        uniq: List[Path] = []
+        seen: set[str] = set()
+        for item in results:
+            key = str(item).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            uniq.append(item)
+        return uniq
 
     def _find_index_file(self, ext_path: Path) -> Optional[Path]:
         assets = ext_path / "webview" / "assets"
@@ -3003,6 +3265,8 @@ class VSCodePluginPage(QtWidgets.QWidget):
         candidates = list(assets.glob("index-*.js"))
         if not candidates:
             return None
+        if len(candidates) == 1:
+            return candidates[0]
         candidates.sort(key=lambda p: (p.stat().st_mtime, p.stat().st_size), reverse=True)
         return candidates[0]
 
@@ -3010,54 +3274,175 @@ class VSCodePluginPage(QtWidgets.QWidget):
     def _parse_extension_version(self, ext_path: Path) -> str:
         name = ext_path.name
         if "openai.chatgpt-" in name:
-            return name.split("openai.chatgpt-", 1)[1] or "未知"
+            return name.split("openai.chatgpt-", 1)[1] or "??"
         if "-" in name:
             return name.rsplit("-", 1)[-1]
-        return "未知"
+        return "??"
 
+    def _split_version_and_platform(self, raw_version: str) -> tuple[str, str]:
+        text = str(raw_version or "").strip()
+        if not text:
+            return "", ""
+        match = re.search(r"\d+\.\d+\.\d+", text)
+        if not match:
+            return "", ""
+        semver = match.group(0)
+        platform = ""
+        tail = text[match.end():]
+        if tail.startswith("-"):
+            platform = tail[1:].strip().lower()
+        return semver, platform
 
-    def _fetch_latest_extension_version(self) -> Optional[str]:
+    def _is_prerelease_version(self, item: object) -> bool:
+        if not isinstance(item, dict):
+            return False
+        flags_text = str(item.get("flags", "")).lower()
+        if "prerelease" in flags_text:
+            return True
+        for prop in (item.get("properties") or []):
+            if not isinstance(prop, dict):
+                continue
+            if prop.get("key") == "Microsoft.VisualStudio.Code.PreRelease":
+                return str(prop.get("value", "")).strip().lower() == "true"
+        return False
+
+    def _marketplace_target_platform(self, item: object) -> str:
+        if not isinstance(item, dict):
+            return ""
+        value = item.get("targetPlatform")
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+        for prop in (item.get("properties") or []):
+            if not isinstance(prop, dict):
+                continue
+            if prop.get("key") == "Microsoft.VisualStudio.Code.TargetPlatform":
+                prop_val = str(prop.get("value", "")).strip().lower()
+                if prop_val:
+                    return prop_val
+        return ""
+
+    def _fetch_marketplace_release_meta(self) -> Optional[Dict[str, object]]:
         url = "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery"
         payload = {
             "filters": [
                 {
                     "criteria": [
                         {"filterType": 7, "value": "openai.chatgpt"},
-                        {"filterType": 8, "value": "openai"},
+                        {"filterType": 8, "value": "Microsoft.VisualStudio.Code"},
                     ]
                 }
             ],
-            "flags": 0x1 | 0x2 | 0x80,
+            "flags": 0x1 | 0x2 | 0x10 | 0x80 | 0x10000,
         }
         data = json.dumps(payload).encode("utf-8")
         req = urllib_request.Request(url, data=data, method="POST")
         req.add_header("Content-Type", "application/json")
         req.add_header("Accept", "application/json;api-version=7.1-preview.1")
+        req.add_header("User-Agent", "CodexSwitcher")
         try:
             with urllib_request.urlopen(req, timeout=6) as resp:
                 body = resp.read().decode("utf-8", errors="ignore")
             obj = json.loads(body)
-        except Exception:
-            return None
-        try:
             ext = obj["results"][0]["extensions"][0]
             versions = ext.get("versions", [])
-            if versions:
-                return versions[0].get("version") or None
+            if not isinstance(versions, list) or not versions:
+                return None
+
+            latest_stable: Optional[str] = None
+            latest_prerelease: Optional[str] = None
+            channel_map: Dict[str, str] = {}
+
+            for item in versions:
+                if not isinstance(item, dict):
+                    continue
+                version = str(item.get("version", "")).strip()
+                if not version:
+                    continue
+                is_prerelease = self._is_prerelease_version(item)
+                platform = self._marketplace_target_platform(item)
+                channel = "preview" if is_prerelease else "stable"
+                if is_prerelease and latest_prerelease is None:
+                    latest_prerelease = version
+                if (not is_prerelease) and latest_stable is None:
+                    latest_stable = version
+                keys = [f"{version}|{platform}", f"{version}|"]
+                for key in keys:
+                    existing = channel_map.get(key)
+                    if existing is None:
+                        channel_map[key] = channel
+                    elif existing != channel:
+                        channel_map[key] = "both"
+
+            if not latest_stable and not latest_prerelease:
+                return None
+            return {
+                "latest_stable": latest_stable,
+                "latest_prerelease": latest_prerelease,
+                "channel_map": channel_map,
+            }
         except Exception:
             return None
-        return None
+
+    def _format_marketplace_latest_text(self, meta: Optional[Dict[str, object]]) -> str:
+        if not meta:
+            return "\u83b7\u53d6\u5931\u8d25"
+        stable = str(meta.get("latest_stable") or "").strip()
+        preview = str(meta.get("latest_prerelease") or "").strip()
+        parts: List[str] = []
+        if stable:
+            parts.append(f"\u7a33\u5b9a\u7248\uff1a{stable}")
+        if preview:
+            parts.append(f"\u9884\u89c8\u7248\uff1a{preview}")
+        return " | ".join(parts) if parts else "\u83b7\u53d6\u5931\u8d25"
+
+    def _channel_label_from_meta(self, raw_version: str) -> str:
+        meta = self._marketplace_meta
+        if not meta:
+            return ""
+        semver, platform = self._split_version_and_platform(raw_version)
+        if not semver:
+            return ""
+        channel_map = meta.get("channel_map")
+        channel = None
+        if isinstance(channel_map, dict):
+            channel = channel_map.get(f"{semver}|{platform}") or channel_map.get(f"{semver}|")
+        if channel is None:
+            if semver == str(meta.get("latest_stable") or ""):
+                channel = "stable"
+            elif semver == str(meta.get("latest_prerelease") or ""):
+                channel = "preview"
+        if channel == "stable":
+            return "\u7a33\u5b9a\u7248"
+        if channel == "preview":
+            return "\u9884\u89c8\u7248"
+        if channel == "both":
+            return "\u7a33\u5b9a/\u9884\u89c8\u5747\u6709"
+        return ""
 
     def refresh_extensions(self) -> None:
         self.ext_combo.clear()
         self.extension_items = []
-        latest = self._fetch_latest_extension_version()
-        if latest:
-            self.ext_latest_label.setText(latest)
-        else:
-            self.ext_latest_label.setText("获取失败")
+        self._marketplace_meta = self._fetch_marketplace_release_meta()
         for path in self._find_extensions():
             self.extension_items.append({"path": path, "version": self._parse_extension_version(path)})
+        if self._marketplace_meta:
+            latest_text = self._format_marketplace_latest_text(self._marketplace_meta)
+            self.ext_latest_label.setText(latest_text)
+            self.ext_latest_label.setToolTip(latest_text)
+        elif self.extension_items:
+            self.ext_latest_label.setText("\u83b7\u53d6\u5931\u8d25\uff08\u5df2\u663e\u793a\u672c\u5730\u626b\u63cf\u7ed3\u679c\uff09")
+            self.ext_latest_label.setToolTip("")
+        else:
+            self.ext_latest_label.setText("\u83b7\u53d6\u5931\u8d25")
+            self.ext_latest_label.setToolTip("")
+
+        self.extension_items.sort(
+            key=lambda item: (
+                tuple(int(x) for x in re.findall(r"\d+", str(item.get("version", "")))[:3]),
+                (item.get("path").stat().st_mtime if isinstance(item.get("path"), Path) and item.get("path").exists() else 0),
+            ),
+            reverse=True,
+        )
         if not self.extension_items:
             self.ext_combo.addItem("未发现 openai.chatgpt 扩展")
             self.ext_path_label.setText("-")
@@ -3070,6 +3455,7 @@ class VSCodePluginPage(QtWidgets.QWidget):
             self.ext_combo.addItem(item["path"].name, item)
         self.ext_combo.setCurrentIndex(0)
         self.on_extension_changed(0)
+        self.status_label.setText(f"扫描完成：发现 {len(self.extension_items)} 个 openai.chatgpt 扩展")
 
     def on_extension_changed(self, index: int) -> None:
         if index < 0 or index >= len(self.extension_items):
@@ -3077,7 +3463,16 @@ class VSCodePluginPage(QtWidgets.QWidget):
         item = self.extension_items[index]
         ext_path = item["path"]
         self.ext_path_label.setText(str(ext_path))
-        self.ext_version_label.setText(str(item.get("version", "-")))
+        raw_version = str(item.get("version", "-"))
+        channel_label = self._channel_label_from_meta(raw_version)
+        if channel_label:
+            display_version = f"{raw_version}（{channel_label}）"
+        elif self._marketplace_meta is None:
+            display_version = f"{raw_version}（渠道未知）"
+        else:
+            display_version = raw_version
+        self.ext_version_label.setText(display_version)
+        self.ext_version_label.setToolTip(display_version)
         self._index_path = self._find_index_file(ext_path)
         self.index_path_label.setText(str(self._index_path) if self._index_path else "未找到")
 
@@ -3140,6 +3535,10 @@ class VSCodePluginPage(QtWidgets.QWidget):
             message_error(self, "失败", str(exc))
 
     def open_backup_dir(self) -> None:
+        if not self._backup_dir and self._index_path:
+            candidate = self._backup_dir_for_index(self._index_path)
+            if candidate.exists():
+                self._backup_dir = candidate
         if not self._backup_dir:
             message_warn(self, "提示", "尚未生成备份")
             return
@@ -3148,97 +3547,88 @@ class VSCodePluginPage(QtWidgets.QWidget):
         except Exception as exc:
             message_error(self, "失败", str(exc))
 
-    def _apply_model_order(self, content: str, model: str) -> tuple[str, bool]:
-        key = "MODEL_ORDER_BY_AUTH_METHOD"
-        idx = content.find(key)
-        if idx == -1:
+    def _apply_allowlist_patch(self, content: str) -> tuple[str, bool]:
+        if "SUe=new Set" not in content:
             return content, False
-        brace_start = content.find("{", idx)
-        if brace_start == -1:
+        pattern = re.compile(r"SUe=new Set\(\[(.*?)\]\)")
+        match = pattern.search(content)
+        if not match:
             return content, False
-        depth = 0
-        end = -1
-        for i in range(brace_start, len(content)):
-            if content[i] == "{":
-                depth += 1
-            elif content[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    end = i
-                    break
-        if end == -1:
-            return content, False
-        block = content[brace_start:end + 1]
-        m = re.search(r"apikey\s*:\s*\[(.*?)\]", block, flags=re.S)
-        if not m:
-            return content, False
-        list_body = m.group(1)
-        items = [m2.group(2) for m2 in re.finditer(r"(['\"])(.*?)\1", list_body)]
-        quote = "\""
-        qmatch = re.search(r"(['\"])", list_body)
-        if qmatch:
-            quote = qmatch.group(1)
-        items = [i for i in items if i and i != model]
-        items.insert(0, model)
-        new_list = ",".join(f"{quote}{i}{quote}" for i in items)
-        new_block = block[:m.start(1)] + new_list + block[m.end(1):]
-        new_content = content[:brace_start] + new_block + content[end + 1:]
-        return new_content, True
-
-    def _apply_chatgpt_only(self, content: str) -> tuple[str, bool]:
-        key = "CHAT_GPT_AUTH_ONLY_MODELS"
-        idx = content.find(key)
-        if idx == -1:
-            return content, False
-        bracket_start = content.find("[", idx)
-        if bracket_start == -1:
-            return content, False
-        depth = 0
-        end = -1
-        for i in range(bracket_start, len(content)):
-            if content[i] == "[":
-                depth += 1
-            elif content[i] == "]":
-                depth -= 1
-                if depth == 0:
-                    end = i
-                    break
-        if end == -1:
-            return content, False
-        list_body = content[bracket_start + 1:end]
-        quote = "\""
-        qmatch = re.search(r"(['\"])", list_body)
-        if qmatch:
-            quote = qmatch.group(1)
-        new_list = f"{quote}codex-auto{quote}"
-        new_content = content[:bracket_start + 1] + new_list + content[end:]
-        return new_content, True
-
-    def _apply_fallback_guard(self, content: str) -> tuple[str, bool]:
-        if 'Ye!=="apikey"' in content:
+        body = match.group(1)
+        if '"gpt-5.3-codex"' in body or "'gpt-5.3-codex'" in body:
             return content, True
-        pattern = re.compile(r"(!lt\s*&&\s*)(!!mt\s*&&\s*CHAT_GPT_AUTH_ONLY_MODELS\.has\(normalizeModel\(mt\)\))")
-        new_content, count = pattern.subn(r"\\1Ye!==\"apikey\" && \\2", content, count=1)
-        if count > 0:
-            return new_content, True
-        anchor = "CHAT_GPT_AUTH_ONLY_MODELS.has(normalizeModel(mt))"
-        idx = content.find(anchor)
-        if idx == -1:
+        quote = '"' if '"' in body else "'"
+        new_body = f"{quote}gpt-5.3-codex{quote}," + body
+        return content[: match.start(1)] + new_body + content[match.end(1) :], True
+
+    def _apply_apikey_filter_patch(self, content: str) -> tuple[str, bool]:
+        src = 'i==="chatgpt"?!0:(i==="copilot"?kUe:SUe).has(v.model)'
+        dst = 'i==="chatgpt"||i==="apikey"?!0:(i==="copilot"?kUe:SUe).has(v.model)'
+        if dst in content:
+            return content, True
+        if src not in content:
             return content, False
-        window_start = max(0, idx - 200)
-        window = content[window_start:idx]
-        lt_idx = window.rfind("!lt")
-        if lt_idx == -1:
+        return content.replace(src, dst, 1), True
+
+    def _apply_apikey_order_inject_patch(self, content: str) -> tuple[str, bool]:
+        if 'i==="apikey"&&(()=>{' not in content:
             return content, False
-        insert_pos = window_start + lt_idx + len("!lt")
-        new_content = content[:insert_pos] + " && Ye!==\"apikey\"" + content[insert_pos:]
-        return new_content, True
+        if 'm.models.find(A=>A.model==="gpt-5.3-codex")||m.models.unshift({' in content:
+            return content, True
+
+        src = (
+            'i==="apikey"&&(()=>{const Y=["gpt-5.3-codex","gpt-5.2-codex","gpt-5.2","gpt-5.1-codex-max",'
+            '"gpt-5.1-codex","gpt-5.1-codex-mini","gpt-5.1","gpt-5-codex-mini"],X=new Map(Y.map((A,R)=>[A,R]));'
+            'm.models.sort((A,R)=>{const D=X.get(A.model),I=X.get(R.model);return D===void 0&&I===void 0?0:D===void 0?1:I===void 0?-1:D-I})})()'
+        )
+        dst = (
+            'i==="apikey"&&(()=>{const Y=["gpt-5.3-codex","gpt-5.2-codex","gpt-5.2","gpt-5.1-codex-max",'
+            '"gpt-5.1-codex","gpt-5.1-codex-mini","gpt-5.1","gpt-5-codex-mini"],X=new Map(Y.map((A,R)=>[A,R]));'
+            'm.models.find(A=>A.model==="gpt-5.3-codex")||m.models.unshift({model:"gpt-5.3-codex",supportedReasoningEfforts:'
+            '[{reasoningEffort:"minimal",description:"minimal effort"},{reasoningEffort:"low",description:"low effort"},'
+            '{reasoningEffort:"medium",description:"medium effort"},{reasoningEffort:"high",description:"high effort"},'
+            '{reasoningEffort:"xhigh",description:"xhigh effort"}],defaultReasoningEffort:"medium"}),'
+            'm.models.sort((A,R)=>{const D=X.get(A.model),I=X.get(R.model);return D===void 0&&I===void 0?0:D===void 0?1:I===void 0?-1:D-I})})()'
+        )
+        if src in content:
+            return content.replace(src, dst, 1), True
+
+        fallback = (
+            'i==="apikey"&&(()=>{const Y=["gpt-5.3-codex","gpt-5.2-codex","gpt-5.2","gpt-5.1-codex-max",'
+            '"gpt-5.1-codex","gpt-5.1-codex-mini","gpt-5.1","gpt-5-codex-mini"],X=new Map(Y.map((A,R)=>[A,R]));'
+        )
+        if fallback in content:
+            injected = (
+                fallback
+                + 'm.models.find(A=>A.model==="gpt-5.3-codex")||m.models.unshift({model:"gpt-5.3-codex",supportedReasoningEfforts:'
+                + '[{reasoningEffort:"minimal",description:"minimal effort"},{reasoningEffort:"low",description:"low effort"},'
+                + '{reasoningEffort:"medium",description:"medium effort"},{reasoningEffort:"high",description:"high effort"},'
+                + '{reasoningEffort:"xhigh",description:"xhigh effort"}],defaultReasoningEffort:"medium"}),' 
+            )
+            return content.replace(fallback, injected, 1), True
+        return content, False
+
+    def _apply_initial_data_patch(self, content: str) -> tuple[str, bool]:
+        if 'initialData:i==="apikey"?{data:[' not in content:
+            return content, False
+
+        desired = (
+            'initialData:i==="apikey"?{data:['
+            '{model:"gpt-5.3-codex",supportedReasoningEfforts:[{reasoningEffort:"minimal",description:"minimal effort"},{reasoningEffort:"low",description:"low effort"},{reasoningEffort:"medium",description:"medium effort"},{reasoningEffort:"high",description:"high effort"},{reasoningEffort:"xhigh",description:"xhigh effort"}],defaultReasoningEffort:"medium",isDefault:!1},'
+            '{model:"gpt-5.2-codex",supportedReasoningEfforts:[{reasoningEffort:"minimal",description:"minimal effort"},{reasoningEffort:"low",description:"low effort"},{reasoningEffort:"medium",description:"medium effort"},{reasoningEffort:"high",description:"high effort"},{reasoningEffort:"xhigh",description:"xhigh effort"}],defaultReasoningEffort:"medium",isDefault:!1},'
+            '{model:"gpt-5.2",supportedReasoningEfforts:[{reasoningEffort:"minimal",description:"minimal effort"},{reasoningEffort:"low",description:"low effort"},{reasoningEffort:"medium",description:"medium effort"},{reasoningEffort:"high",description:"high effort"},{reasoningEffort:"xhigh",description:"xhigh effort"}],defaultReasoningEffort:"medium",isDefault:!1}'
+            ']}:void 0'
+        )
+        if desired in content:
+            return content, True
+
+        pattern = re.compile(r'initialData:i===\"apikey\"\?\{data:\[(.*?)\]\}:void 0', re.S)
+        match = pattern.search(content)
+        if not match:
+            return content, False
+        return content[: match.start()] + desired + content[match.end() :], True
 
     def apply_patch(self) -> None:
-        model = self.model_edit.text().strip()
-        if not model:
-            message_warn(self, "提示", "请输入模型名称")
-            return
         if not self._index_path or not self._index_path.exists():
             message_warn(self, "提示", "未找到 index 文件")
             return
@@ -3250,10 +3640,11 @@ class VSCodePluginPage(QtWidgets.QWidget):
 
         backup_path = self._backup_index(self._index_path)
 
-        content, ok1 = self._apply_model_order(original, model)
-        content, ok2 = self._apply_chatgpt_only(content)
-        content, ok3 = self._apply_fallback_guard(content)
-        if not (ok1 and ok2 and ok3):
+        content, ok1 = self._apply_allowlist_patch(original)
+        content, ok2 = self._apply_apikey_filter_patch(content)
+        content, ok3 = self._apply_apikey_order_inject_patch(content)
+        content, ok4 = self._apply_initial_data_patch(content)
+        if not (ok1 and ok2 and ok3 and ok4):
             message_error(self, "失败", "未能定位关键片段，可能与当前插件版本不匹配")
             return
         try:
@@ -3312,9 +3703,10 @@ class VSCodePluginPage(QtWidgets.QWidget):
 class SettingsPage(QtWidgets.QWidget):
 
 
-    def __init__(self, state: AppState) -> None:
+    def __init__(self, state: AppState, on_update_count_changed: Optional[Callable[[int], None]] = None) -> None:
         super().__init__()
         self.state = state
+        self._on_update_count_changed = on_update_count_changed
 
         layout = QtWidgets.QVBoxLayout(self)
         header = QtWidgets.QLabel("检查更新")
@@ -3350,27 +3742,121 @@ class SettingsPage(QtWidgets.QWidget):
         action_row.addWidget(self.open_release_btn)
         action_row.addStretch(1)
         layout.addLayout(action_row)
-        letter_group = QtWidgets.QGroupBox("开发者留言")
-        apply_white_shadow(letter_group)
-        letter_layout = QtWidgets.QVBoxLayout(letter_group)
-        note = QtWidgets.QLabel(
-            "各位佬：<br><br>"
-            "感谢使用Codex Switcher。因为市面上已经有太多类似CC switch的成熟多账号管理工具。本质上，这就是一个套娃工具，基于对config.toml、auth.json、opencode.json 文件读取和修改，一开始我只是作为一个切换脚本供自己便用的。后来无意中分享给了一位群友，并在他的建议下进一步做了UI界面。<br><br>"
-            "我深知如果把它作为一个产品来说，本身是有很多不足和bug的；再者从我自己的使用习惯和角度来说，主力就是codex，所以开发时并没有考虑添加claude code的账号管理功能，以及对一些优秀的国产大模型的支持。我甚至有想过用Rust来重构，因为开源项目本身就是靠情怀支撑的。<br><br>"
-            "无奈手里还有太多的活要干（要给自己赚工资），只能利用闲暇之余，再慢慢debug和升级。<br><br>"
-            "如果佬对本产品有更好的想法和建议，欢迎交流、反馈，更欢迎您一起""fork+pr""，共同推动这个小工具的进步，这大概是我们在AI大浪潮席卷的时代，能够唯一留下的轻微足迹。<br><br>"
-            "反馈渠道:    L站、GitHub或者电子邮件:nkosi.fang@gmail.com<br>"
-            "<div style=\"text-align:right;\">nkosi</div>"
-        )
-        note.setStyleSheet("color: #000;")
-        note.setWordWrap(True)
-        note.setTextFormat(QtCore.Qt.RichText)
-        letter_layout.addWidget(note)
-        layout.addWidget(letter_group)
+        feedback_group = QtWidgets.QGroupBox("开发者反馈")
+        apply_white_shadow(feedback_group)
+        feedback_layout = QtWidgets.QVBoxLayout(feedback_group)
+        feedback_tip = QtWidgets.QLabel("本工具永久开源免费，扫码添加开发者好友，反馈bug和需求")
+        feedback_tip.setAlignment(QtCore.Qt.AlignHCenter)
+        feedback_tip.setStyleSheet("color: #000; font-weight: 600;")
+        feedback_layout.addWidget(feedback_tip)
+        self.dev_qr_image = QtWidgets.QLabel()
+        self.dev_qr_image.setAlignment(QtCore.Qt.AlignCenter)
+        self.dev_qr_image.setFixedSize(220, 220)
+        self.dev_qr_image.setStyleSheet("border: 1px solid #ddd; border-radius: 8px; background: #fff;")
+        feedback_layout.addWidget(self.dev_qr_image, 0, QtCore.Qt.AlignHCenter)
+        self.dev_qr_hint = QtWidgets.QLabel("")
+        self.dev_qr_hint.setAlignment(QtCore.Qt.AlignCenter)
+        self.dev_qr_hint.setWordWrap(True)
+        self.dev_qr_hint.setStyleSheet("color: #666;")
+        self.dev_qr_hint.setVisible(False)
+        feedback_layout.addWidget(self.dev_qr_hint)
+        self._load_developer_qr()
+        layout.addWidget(feedback_group)
         layout.addStretch(1)
         self._latest_url = f"https://github.com/{APP_REPO}/releases/latest"
         self._checked_once = False
         self._notified = False
+        self._last_update_count = 0
+        self._checking = False
+
+    def _developer_qr_candidates(self) -> List[Path]:
+        roots: List[Path] = []
+
+        def add_root(raw: Optional[Path]) -> None:
+            if not raw:
+                return
+            try:
+                resolved = raw.resolve()
+            except Exception:
+                resolved = raw
+            key = str(resolved).lower()
+            if key not in seen_roots:
+                seen_roots.add(key)
+                roots.append(resolved)
+
+        seen_roots: set[str] = set()
+
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            add_root(Path(meipass))
+
+        script_dir = Path(__file__).resolve().parent
+        exe_dir = Path(sys.executable).resolve().parent
+        cwd = Path.cwd()
+
+        add_root(script_dir)
+        add_root(exe_dir)
+        add_root(cwd)
+
+        # ??????????<project>/dist/CodexSwitcher.exe
+        add_root(exe_dir.parent)
+        add_root(exe_dir.parent.parent)
+        if exe_dir.name.lower() == "dist":
+            add_root(exe_dir.parent)
+
+        # ???????? dist ??????????
+        for root in list(roots):
+            add_root(root / "dist")
+
+        names = [
+            "developer_qr.png",
+            "developer_qr.jpg",
+            "developer_qr.jpeg",
+            "dev_qr.png",
+            "dev_qr.jpg",
+            "dev_qr.jpeg",
+            "feedback_qr.png",
+            "feedback_qr.jpg",
+            "feedback_qr.jpeg",
+        ]
+
+        paths: List[Path] = []
+        seen_paths: set[str] = set()
+        for root in roots:
+            for name in names:
+                candidate = root / name
+                key = str(candidate).lower()
+                if key in seen_paths:
+                    continue
+                seen_paths.add(key)
+                paths.append(candidate)
+        return paths
+
+    def _load_developer_qr(self) -> None:
+        target = max(120, min(self.dev_qr_image.width(), self.dev_qr_image.height()) - 20)
+        candidates = self._developer_qr_candidates()
+        for path in candidates:
+            if not path.exists():
+                continue
+            pixmap = QtGui.QPixmap(str(path))
+            if pixmap.isNull():
+                continue
+            scaled = pixmap.scaled(
+                target,
+                target,
+                QtCore.Qt.KeepAspectRatio,
+                QtCore.Qt.SmoothTransformation,
+            )
+            self.dev_qr_image.setPixmap(scaled)
+            self.dev_qr_image.setText("")
+            self.dev_qr_hint.clear()
+            self.dev_qr_hint.setVisible(False)
+            return
+
+        self.dev_qr_image.setPixmap(QtGui.QPixmap())
+        self.dev_qr_image.setText("未找到二维码图片")
+        self.dev_qr_hint.setText("请将二维码保存为 developer_qr.png 并放到程序目录")
+        self.dev_qr_hint.setVisible(True)
 
     def _header_font(self) -> QtGui.QFont:
         font = QtGui.QFont("Segoe UI", 12)
@@ -3387,6 +3873,9 @@ class SettingsPage(QtWidgets.QWidget):
         QtGui.QDesktopServices.openUrl(QtCore.QUrl(self._latest_url))
 
     def check_update(self, auto: bool = False) -> None:
+        if self._checking:
+            return
+        self._checking = True
         self.check_btn.setEnabled(False)
         self.update_status.setText("状态：检查中...")
         self.latest_version.setText("最新版本：-")
@@ -3406,6 +3895,7 @@ class SettingsPage(QtWidgets.QWidget):
                     notes_text = f"无法获取更新内容：{exc}"
 
             def done() -> None:
+                self._checking = False
                 self.check_btn.setEnabled(True)
                 if ok:
                     self._latest_url = url or self._latest_url
@@ -3414,6 +3904,8 @@ class SettingsPage(QtWidgets.QWidget):
                         self.release_notes.setPlainText(notes_text or "无更新内容")
                     status_text, has_update = self._compare_versions(APP_VERSION, latest_ver)
                     self.update_status.setText(status_text)
+                    update_count = self._version_gap_count(APP_VERSION, latest_ver) if has_update else 0
+                    self._emit_update_count(update_count)
                     if has_update and not self._notified:
                         self._notified = True
                         message_info(self, "发现新版本", f"检测到新版本：{latest_ver}\n请前往发布页下载。")
@@ -3425,6 +3917,67 @@ class SettingsPage(QtWidgets.QWidget):
             run_in_ui(done)
 
         threading.Thread(target=runner, daemon=True).start()
+
+    def _emit_update_count(self, count: int) -> None:
+        if count == self._last_update_count:
+            return
+        self._last_update_count = count
+        if self._on_update_count_changed:
+            self._on_update_count_changed(count)
+
+    def _version_gap_count(self, local: Optional[str], latest: Optional[str]) -> int:
+        local_sem = self._extract_semver(local or "")
+        latest_sem = self._extract_semver(latest or "")
+        if not local_sem or not latest_sem:
+            return 0
+        release_count = self._count_releases_behind(local_sem, latest_sem)
+        if release_count > 0:
+            return release_count
+        try:
+            local_parts = [int(p) for p in local_sem.split(".")]
+            latest_parts = [int(p) for p in latest_sem.split(".")]
+        except Exception:
+            return 0
+        while len(local_parts) < 3:
+            local_parts.append(0)
+        while len(latest_parts) < 3:
+            latest_parts.append(0)
+        if tuple(latest_parts) <= tuple(local_parts):
+            return 0
+        return max(1, latest_parts[2] - local_parts[2])
+
+    def _count_releases_behind(self, local_sem: str, latest_sem: str) -> int:
+        if local_sem == latest_sem:
+            return 0
+        api_url = f"https://api.github.com/repos/{APP_REPO}/releases?per_page=100"
+        req = urllib_request.Request(api_url, headers={"User-Agent": "CodexSwitcher"})
+        try:
+            with urllib_request.urlopen(req, timeout=6) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return 0
+        if not isinstance(data, list):
+            return 0
+        versions: List[str] = []
+        seen: set[str] = set()
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            tag = item.get("tag_name") or item.get("name") or ""
+            ver = self._extract_semver(tag)
+            if not ver or ver in seen:
+                continue
+            seen.add(ver)
+            versions.append(ver)
+        if latest_sem not in versions:
+            return 0
+        latest_index = versions.index(latest_sem)
+        if local_sem in versions:
+            local_index = versions.index(local_sem)
+            if local_index <= latest_index:
+                return 0
+            return local_index - latest_index
+        return 1
 
     def _filter_release_sections(self, body: str) -> str:
         wanted = {"标题", "变更"}
@@ -3686,7 +4239,7 @@ class SessionManagerPage(QtWidgets.QWidget):
         self._update_session_split()
 
         # Cleanup group
-        cleanup_group = QtWidgets.QGroupBox("清理")
+        cleanup_group = QtWidgets.QGroupBox("统一清理")
         apply_white_shadow(cleanup_group)
         cleanup_layout = QtWidgets.QHBoxLayout(cleanup_group)
         self.clean_mode = QtWidgets.QComboBox()
@@ -3892,7 +4445,7 @@ class SessionManagerPage(QtWidgets.QWidget):
             row.setData(QtCore.Qt.UserRole, item)
             self.list_widget.addItem(row)
             shown += 1
-        self.count_label.setText(f"共 {shown} 条<b>【ⓘ 提示：鼠标右键可打开文件夹 / 继续该会话（Codex CLI）/ VS Code打开该目录 / WebView 修复】</b>")
+        self.count_label.setText(f"共 {shown} 条<b>【ⓘ 提示：鼠标右键Codex CLI/VS Code继续该会话、管理会话。】</b>")
         if shown == 0 and show_empty:
             self.detail_text.setPlainText("无匹配会话。")
 
@@ -4134,19 +4687,58 @@ class SessionManagerPage(QtWidgets.QWidget):
         if not item:
             return
         menu = QtWidgets.QMenu(self)
-        open_folder = menu.addAction("打开文件夹")
         resume_session = menu.addAction("继续该会话（Codex CLI）")
-        resume_vscode = menu.addAction("VS Code打开该目录")
+        resume_vscode = menu.addAction("继续该会话（VS Code）")
+        menu.addSeparator()
+        open_folder = menu.addAction("打开文件夹")
+        delete_session = menu.addAction("删除该会话")
         repair_webview = menu.addAction("WebView 修复")
         action = menu.exec(self.list_widget.mapToGlobal(pos))
-        if action == open_folder:
-            self._open_session_folder(item)
-        elif action == resume_session:
+        if action == resume_session:
             self._resume_session(item)
         elif action == resume_vscode:
             self._resume_session_vscode(item)
+        elif action == open_folder:
+            self._open_session_folder(item)
+        elif action == delete_session:
+            self._delete_session(item)
         elif action == repair_webview:
             self._resume_session_vscode(item, fix_webview=True)
+
+    def _delete_session(self, item: QtWidgets.QListWidgetItem) -> None:
+        meta = item.data(QtCore.Qt.UserRole)
+        if not isinstance(meta, dict):
+            return
+        fpath = meta.get("path", "")
+        sid = meta.get("id", "")
+        if not fpath:
+            message_warn(self, "提示", "未找到会话文件路径，无法删除")
+            return
+        path = Path(fpath)
+        size_mb = 0.0
+        try:
+            if path.exists():
+                size_mb = path.stat().st_size / (1024 * 1024)
+        except Exception:
+            size_mb = 0.0
+
+        prompt = f"将删除该会话文件：\n{fpath}\n\n大小约 {size_mb:.1f} MB。是否继续？"
+        if sid:
+            prompt += "\n\n同时会清理 history.jsonl 中该会话关联记录。"
+        reply = QtWidgets.QMessageBox.question(self, "确认删除", prompt)
+        if reply != QtWidgets.QMessageBox.Yes:
+            return
+
+        try:
+            path.unlink(missing_ok=True)
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+            return
+
+        if sid:
+            self._cleanup_history({sid})
+        self.refresh_index()
+        self.detail_text.setPlainText("已删除该会话。")
 
     def _open_session_folder(self, item: QtWidgets.QListWidgetItem) -> None:
         meta = item.data(QtCore.Qt.UserRole)
@@ -4226,12 +4818,88 @@ class SessionManagerPage(QtWidgets.QWidget):
             def worker() -> None:
                 self._kill_vscode_processes()
                 self._clear_vscode_cache(self._get_saved_vscode_install_dir())
-                run_in_ui(lambda: self._launch_vscode_for_session(cwd))
+                run_in_ui(lambda: self._launch_vscode_for_session(cwd, sid))
+
             threading.Thread(target=worker, daemon=True).start()
             return
-        self._launch_vscode_for_session(cwd)
+        self._launch_vscode_for_session(cwd, sid)
 
-    def _launch_vscode_for_session(self, cwd: str) -> None:
+    def _open_url(self, url: str) -> tuple[bool, str]:
+        try:
+            if os.name == "nt":
+                os.startfile(url)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", url])
+            else:
+                subprocess.Popen(["xdg-open", url])
+            return True, ""
+        except Exception as exc:
+            return False, str(exc)
+
+    def _build_vscode_thread_uris(self, sid: str) -> List[str]:
+        safe_sid = urlquote((sid or "").strip(), safe="")
+        if not safe_sid:
+            return []
+        return [
+            f"vscode://openai.chatgpt/local/{safe_sid}",
+            f"vscode://openai.chatgpt/thread-overlay/{safe_sid}",
+            f"vscode://openai.chatgpt/remote/{safe_sid}",
+        ]
+
+    def _log_vscode_uri_debug(self, sid: str, cwd: str, phase: str, attempts: list[dict], opened_uri: str) -> None:
+        lines = [
+            f"phase={phase}",
+            f"session_id={sid or '-'}",
+            f"cwd={cwd or '-'}",
+            f"opened_uri={opened_uri or '-'}",
+            f"attempt_count={len(attempts)}",
+        ]
+        for idx, attempt in enumerate(attempts, 1):
+            status = "OK" if attempt.get("ok") else "FAIL"
+            uri = attempt.get("uri", "")
+            err = (attempt.get("error") or "").strip()
+            if err:
+                lines.append(f"{idx}. {status} | uri={uri} | error={err}")
+            else:
+                lines.append(f"{idx}. {status} | uri={uri}")
+        log_diagnosis("VS Code URI Debug", "\n".join(lines))
+
+    def _try_open_vscode_thread_by_uri(self, sid: str, cwd: str = "") -> bool:
+        uris = self._build_vscode_thread_uris(sid)
+        if not uris:
+            self._log_vscode_uri_debug(sid, cwd, "first-empty", [], "")
+            return False
+
+        attempts: list[dict] = []
+        opened_uri = ""
+        for uri in uris:
+            ok, err = self._open_url(uri)
+            attempts.append({"uri": uri, "ok": ok, "error": err})
+            if ok:
+                opened_uri = uri
+                break
+
+        self._log_vscode_uri_debug(sid, cwd, "first", attempts, opened_uri)
+
+        if opened_uri:
+            def retry() -> None:
+                time.sleep(1.2)
+                retry_attempts: list[dict] = []
+                retry_opened_uri = ""
+                for uri in uris:
+                    ok, err = self._open_url(uri)
+                    retry_attempts.append({"uri": uri, "ok": ok, "error": err})
+                    if ok:
+                        retry_opened_uri = uri
+                        break
+                self._log_vscode_uri_debug(sid, cwd, "retry", retry_attempts, retry_opened_uri)
+
+            threading.Thread(target=retry, daemon=True).start()
+            return True
+
+        return False
+
+    def _launch_vscode_for_session(self, cwd: str, sid: str = "") -> None:
         code_cli = self._find_vscode_cli()
         args = None
         if code_cli and self._vscode_supports_command(code_cli):
@@ -4248,14 +4916,23 @@ class SessionManagerPage(QtWidgets.QWidget):
             message_warn(self, "提示", "未找到 VS Code，可先安装或在 PATH 中启用 code 命令")
             return
         try:
-            subprocess.Popen(args)
+            _popen_hidden_cmd_on_windows(args)
         except Exception as exc:
             message_error(self, "失败", str(exc))
             return
+
+        if self._try_open_vscode_thread_by_uri(sid, cwd):
+            message_info(
+                self,
+                "提示",
+                "已尝试通过 URI 按会话 ID 打开该会话；如插件版本暂不支持，将自动回退为仅打开该会话工作目录。",
+            )
+            return
+
         message_info(
             self,
             "提示",
-            "官方Codex vscode插件还未支持通过会话ID继续会话的接口，只会打开该会话所在工作目录。\n\n如需查看会话记录，请通过右侧会话详情，或在CODEX CLI续聊。",
+            "当前环境未能通过 URI 按会话ID直达会话，已打开该会话工作目录。",
         )
 
     def _get_saved_vscode_install_dir(self) -> Optional[Path]:
@@ -4733,7 +5410,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pages["codex_status"] = CodexStatusPage(self.state)
         self.pages["vscode_plugin"] = VSCodePluginPage(self.state)
         self.pages["skills"] = SkillsPage(self.state)
-        self.pages["settings"] = SettingsPage(self.state)
+        self.pages["settings"] = SettingsPage(self.state, on_update_count_changed=self._on_update_count_changed)
         self.pages["openai_status"] = OpenAIStatusPage(self.state)
         self.pages["sessions"] = SessionManagerPage(self.state)
 
@@ -4741,6 +5418,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.stack.addWidget(page)
 
         self.buttons = []
+        self._nav_button_map: Dict[str, QtWidgets.QPushButton] = {}
+        self._settings_nav_btn: Optional[NavBadgeButton] = None
         self._add_nav_button(nav, "Codex CLI状态", "codex_status")
         self._add_nav_button(nav, "config.toml配置", "config_toml")
         self._add_nav_button(nav, "opencode 配置", "opencode")
@@ -4753,14 +5432,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self._add_nav_button(nav, "检查更新", "settings")
         nav.addStretch(1)
 
+        self._update_check_timer = QtCore.QTimer(self)
+        self._update_check_timer.setInterval(15 * 60 * 1000)
+        self._update_check_timer.timeout.connect(self._auto_check_updates)
+        self._update_check_timer.start()
+        QtCore.QTimer.singleShot(1200, self._auto_check_updates)
+
         self.show_page("account")
 
     def _add_nav_button(self, layout: QtWidgets.QVBoxLayout, label: str, key: str) -> None:
-        btn = QtWidgets.QPushButton(label)
+        if key == "settings":
+            btn = NavBadgeButton(label)
+            self._settings_nav_btn = btn
+        else:
+            btn = QtWidgets.QPushButton(label)
         btn.setCheckable(True)
         btn.clicked.connect(lambda _: self.show_page(key))
         layout.addWidget(btn)
         self.buttons.append((key, btn))
+        self._nav_button_map[key] = btn
 
     def show_page(self, key: str) -> None:
         page = self.pages.get(key)
@@ -4776,6 +5466,15 @@ class MainWindow(QtWidgets.QMainWindow):
         for page in self.pages.values():
             if hasattr(page, "on_show"):
                 getattr(page, "on_show")()
+
+    def _auto_check_updates(self) -> None:
+        page = self.pages.get("settings")
+        if isinstance(page, SettingsPage):
+            page.check_update(auto=True)
+
+    def _on_update_count_changed(self, count: int) -> None:
+        if self._settings_nav_btn is not None:
+            self._settings_nav_btn.set_badge_count(count)
 
 
 def apply_material_theme(app: QtWidgets.QApplication) -> bool:
