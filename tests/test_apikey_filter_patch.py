@@ -31,6 +31,20 @@ class ApplyApiKeyFilterPatchTests(unittest.TestCase):
         self.assertIn('!=="apikey"', patched)
         self.assertIn('CHAT_GPT_AUTH_ONLY_MODELS = new Set(["gpt-4.1"])', patched)
 
+    def test_does_not_report_success_when_apikey_gate_is_missing(self):
+        subject = self._build_subject()
+        models = ["gpt-5.3-codex"]
+        content = (
+            'if(flag&&!!mt&&CHAT_GPT_AUTH_ONLY_MODELS.has(normalizeModel(mt))){return;}'
+            'CHAT_GPT_AUTH_ONLY_MODELS = new Set(["gpt-5.3-codex","gpt-4.1"]);'
+        )
+
+        patched, ok = subject._apply_apikey_filter_patch(content, models)
+
+        self.assertFalse(ok)
+        self.assertNotIn('i==="chatgpt"||i==="apikey"?!0:', patched)
+
+
 
 if __name__ == "__main__":
     unittest.main()

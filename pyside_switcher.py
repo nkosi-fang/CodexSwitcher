@@ -57,7 +57,7 @@ from codex_switcher import (
 
 
 APP_TITLE = "Codex Switcher"
-APP_VERSION = "2.0.6"
+APP_VERSION = "2.0.7"
 APP_REPO = "nkosi-fang/CodexSwitcher"
 
 CODING_COMPONENTS = [
@@ -3781,16 +3781,16 @@ class VSCodePluginPage(QtWidgets.QWidget):
 
     def _apply_apikey_filter_patch(self, content: str, models: List[str]) -> tuple[str, bool]:
         patched = content
-        ok_any = False
+        gate_ok = False
 
         if 'i==="chatgpt"||i==="apikey"?!0:' in patched:
-            ok_any = True
+            gate_ok = True
         else:
             src = 'i==="chatgpt"?!0:(i==="copilot"?kUe:SUe).has(v.model)'
             dst = 'i==="chatgpt"||i==="apikey"?!0:(i==="copilot"?kUe:SUe).has(v.model)'
             if src in patched:
                 patched = patched.replace(src, dst, 1)
-                ok_any = True
+                gate_ok = True
             else:
                 pattern = re.compile(
                     r'i==="chatgpt"\?!0:\(i==="copilot"\?([A-Za-z_$][\w$]*):([A-Za-z_$][\w$]*)\)\.has\(v\.model\)'
@@ -3801,15 +3801,15 @@ class VSCodePluginPage(QtWidgets.QWidget):
                         f'i==="chatgpt"||i==="apikey"?!0:(i==="copilot"?{match.group(1)}:{match.group(2)}).has(v.model)'
                     )
                     patched = patched[: match.start()] + replacement + patched[match.end() :]
-                    ok_any = True
+                    gate_ok = True
 
-        patched, guard_ok = self._apply_chatgpt_auth_guard_patch(patched)
-        ok_any = ok_any or guard_ok
+        # These two patches are useful hardening, but they are not sufficient to
+        # guarantee API-key routing on their own. Keep gate_ok as the success signal.
+        patched, _ = self._apply_chatgpt_auth_guard_patch(patched)
+        patched, _ = self._apply_chatgpt_auth_only_models_patch(patched, models)
 
-        patched, set_ok = self._apply_chatgpt_auth_only_models_patch(patched, models)
-        ok_any = ok_any or set_ok
+        return patched, gate_ok
 
-        return patched, ok_any
 
     def _apply_apikey_order_inject_patch(self, content: str, models: List[str]) -> tuple[str, bool]:
         prefix = re.compile(
