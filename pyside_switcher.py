@@ -57,7 +57,7 @@ from codex_switcher import (
 
 
 APP_TITLE = "Codex Switcher"
-APP_VERSION = "2.0.5"
+APP_VERSION = "2.0.6"
 APP_REPO = "nkosi-fang/CodexSwitcher"
 
 CODING_COMPONENTS = [
@@ -1365,9 +1365,6 @@ class CodexStatusPage(QtWidgets.QWidget):
         self._local_version: Optional[str] = None
         self._latest_version: Optional[str] = None
         self._workspace_dir: Optional[Path] = None
-        self._vscode_install_dir: Optional[Path] = None
-        if isinstance(self.state.vscode_install_dir, str) and self.state.vscode_install_dir:
-            self._vscode_install_dir = Path(self.state.vscode_install_dir)
 
         layout = QtWidgets.QVBoxLayout(self)
         header = QtWidgets.QLabel("Codex 状态")
@@ -1415,35 +1412,9 @@ class CodexStatusPage(QtWidgets.QWidget):
         self.latest_group = latest_group
         layout.addWidget(self.latest_group)
 
-        launch_group = QtWidgets.QGroupBox("一键启动")
+        launch_group = QtWidgets.QGroupBox("Codex CLI 一键启动")
         apply_white_shadow(launch_group)
         launch_layout = QtWidgets.QVBoxLayout(launch_group)
-        vscode_row = QtWidgets.QHBoxLayout()
-        vscode_caption = QtWidgets.QLabel("VS Code 安装目录")
-        self.vscode_path_edit = QtWidgets.QLineEdit()
-        self.vscode_path_edit.setReadOnly(True)
-        self.vscode_path_edit.setPlaceholderText("未选择将使用vscode在win中的默认安装路径")
-        self.vscode_path_edit.setText("未选择将使用vscode在win中的默认安装路径")
-        self.vscode_path_edit.setClearButtonEnabled(False)
-        self.vscode_path_edit.setMinimumHeight(32)
-        self.vscode_path_edit.setStyleSheet(
-            "QLineEdit {"
-            "border: 1px solid #8ea6ff;"
-            "border-radius: 6px;"
-            "padding: 4px 8px;"
-            "background: #ffffff;"
-            "}"
-            "QLineEdit:read-only {"
-            "background: #f7f9ff;"
-            "}"
-        )
-        self.vscode_path_edit.setToolTip("未选择将使用vscode在win中的默认安装路径")
-        self.pick_vscode_btn = QtWidgets.QPushButton("选择目录")
-        self.pick_vscode_btn.clicked.connect(self.pick_vscode_install_dir)
-        vscode_row.addWidget(vscode_caption)
-        vscode_row.addWidget(self.vscode_path_edit, 1)
-        vscode_row.addWidget(self.pick_vscode_btn)
-        launch_layout.addLayout(vscode_row)
         path_row = QtWidgets.QHBoxLayout()
         workspace_caption = QtWidgets.QLabel("\u5de5\u4f5c\u533a")
         self.workspace_path_edit = QtWidgets.QLineEdit()
@@ -1473,13 +1444,7 @@ class CodexStatusPage(QtWidgets.QWidget):
         launch_btn_row = QtWidgets.QHBoxLayout()
         self.launch_codex_btn = QtWidgets.QPushButton("一键启动 CODEX CLI")
         self.launch_codex_btn.clicked.connect(self.launch_codex_cli)
-        self.launch_vscode_btn = QtWidgets.QPushButton("一键启动 VS Code")
-        self.launch_vscode_btn.clicked.connect(self.launch_vscode)
-        self.fix_webview_btn = QtWidgets.QPushButton("WebView错误修改")
-        self.fix_webview_btn.clicked.connect(self.fix_webview_issue)
         launch_btn_row.addWidget(self.launch_codex_btn)
-        launch_btn_row.addWidget(self.launch_vscode_btn)
-        launch_btn_row.addWidget(self.fix_webview_btn)
         launch_btn_row.addStretch(1)
         launch_layout.addLayout(launch_btn_row)
         layout.addWidget(launch_group)
@@ -1499,7 +1464,6 @@ class CodexStatusPage(QtWidgets.QWidget):
 
     def on_show(self) -> None:
         self.refresh_status()
-        self._refresh_vscode_install_label()
         self._update_debug()
 
     def _handle_refresh_click(self) -> None:
@@ -1596,41 +1560,6 @@ class CodexStatusPage(QtWidgets.QWidget):
             return
         message_info(self, "提示", "已启动更新，请更新完成后重新打开窗口")
 
-    def pick_vscode_install_dir(self) -> None:
-        start_dir = str(self._vscode_install_dir) if self._vscode_install_dir else ""
-        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择 VS Code 安装目录", start_dir)
-        if not folder:
-            return
-        path = Path(folder)
-        exe = self._find_vscode_exe_in_dir(path)
-        if not exe:
-            message_warn(self, "提示", "未在所选目录找到 Code.exe 或 Code - Insiders.exe，请选择包含 Code.exe 的安装目录")
-            return
-        self._vscode_install_dir = path
-        self.state.vscode_install_dir = str(path)
-        self.state.store["vscode_install_dir"] = str(path)
-        save_store(self.state.store)
-        self._refresh_vscode_install_label()
-
-    def _refresh_vscode_install_label(self) -> None:
-        if self._vscode_install_dir and self._vscode_install_dir.exists():
-            self.vscode_path_edit.setText(str(self._vscode_install_dir))
-            self.vscode_path_edit.setToolTip(str(self._vscode_install_dir))
-        else:
-            default_path_hint = "未选择将使用vscode在win中的默认安装路径"
-            self.vscode_path_edit.setText(default_path_hint)
-            self.vscode_path_edit.setToolTip(default_path_hint)
-
-    def _find_vscode_exe_in_dir(self, root: Path) -> Optional[str]:
-        candidates = [
-            root / "Code.exe",
-            root / "Code - Insiders.exe",
-        ]
-        for candidate in candidates:
-            if candidate.is_file():
-                return str(candidate)
-        return None
-
     def pick_workspace(self) -> None:
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择工作区")
         if not folder:
@@ -1672,132 +1601,8 @@ class CodexStatusPage(QtWidgets.QWidget):
         if not ok:
             message_error(self, "失败", "无法启动终端，请手动运行 codex")
 
-    def launch_vscode(self) -> None:
-        workspace = self._ensure_workspace()
-        if not workspace:
-            return
-        code_cli = self._find_vscode_cli()
-        args = None
-        if code_cli and self._vscode_supports_command(code_cli):
-            args = [code_cli, "-r", str(workspace), "--command", "chatgpt.openSidebar"]
-        else:
-            if code_cli:
-                args = [code_cli, "-r", str(workspace)]
-            else:
-                code_exe = self._find_vscode_exe()
-                if code_exe:
-                    args = [code_exe, str(workspace)]
-            self._ensure_open_on_startup(workspace)
-        if not args:
-            message_warn(self, "提示", "未找到 VS Code，可先安装或在 PATH 中启用 code 命令")
-            return
-        try:
-            _popen_hidden_cmd_on_windows(args)
-        except Exception as exc:
-            message_error(self, "失败", str(exc))
-            return
-        message_info(self, "提示", "已打开VS Code并自动启动codex插件，如果遇到VS Code提示“WebView视图相关错误提示”，请点击“WebView错误修改”按钮。")
-
     def _cmd_quote(self, value: str) -> str:
         return '"' + value.replace('"', '""') + '"'
-
-    def fix_webview_issue(self) -> None:
-        workspace = self._ensure_workspace()
-        if not workspace:
-            return
-
-        def worker() -> None:
-            self._kill_vscode_processes()
-            self._clear_vscode_cache(self._vscode_install_dir)
-            run_in_ui(self.launch_vscode)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _kill_vscode_processes(self) -> None:
-        targets = [
-            "Code.exe",
-            "Code - Insiders.exe",
-            "msedgewebview2.exe",
-            "ServiceHub.RoslynCodeAnalysisService.exe",
-            "ServiceHub.Host.Node.x64.exe",
-            "ServiceHub.TestWindowStoreHost.exe",
-        ]
-        for name in targets:
-            try:
-                subprocess.run(["taskkill", "/F", "/T", "/IM", name], capture_output=True, text=True)
-            except Exception:
-                continue
-
-    def _clear_vscode_cache(self, install_dir: Optional[Path] = None) -> None:
-        appdata = os.environ.get("APPDATA")
-        local = os.environ.get("LOCALAPPDATA")
-        paths = []
-        channel = None
-        portable_user_data = None
-        if install_dir:
-            if (install_dir / "Code - Insiders.exe").is_file():
-                channel = "insiders"
-            elif (install_dir / "Code.exe").is_file():
-                channel = "stable"
-            portable_root = install_dir / "data" / "user-data"
-            if portable_root.is_dir():
-                portable_user_data = portable_root
-        if portable_user_data:
-            base = portable_user_data
-            paths += [
-                base / "WebView",
-                base / "CachedData",
-                base / "Cache",
-                base / "GPUCache",
-                base / "Local Storage",
-                base / "Service Worker" / "CacheStorage",
-                base / "Service Worker" / "ScriptCache",
-                base / "User" / "workspaceStorage",
-                base / "User" / "globalStorage",
-            ]
-        else:
-            if channel == "stable":
-                names = ["Code"]
-            elif channel == "insiders":
-                names = ["Code - Insiders"]
-            else:
-                names = ["Code", "Code - Insiders"]
-            if appdata:
-                base = Path(appdata)
-                for name in names:
-                    root = base / name
-                    paths += [
-                        root / "WebView",
-                        root / "CachedData",
-                        root / "Cache",
-                        root / "GPUCache",
-                        root / "Local Storage",
-                        root / "Service Worker" / "CacheStorage",
-                        root / "Service Worker" / "ScriptCache",
-                    ]
-            if local:
-                base = Path(local) / "Microsoft"
-                if channel == "stable":
-                    local_names = ["Code"]
-                elif channel == "insiders":
-                    local_names = ["Code - Insiders"]
-                else:
-                    local_names = ["Code", "Code - Insiders"]
-                for name in local_names:
-                    root = base / name
-                    paths += [
-                        root / "User" / "workspaceStorage",
-                        root / "User" / "globalStorage",
-                    ]
-                paths.append(Path(local) / "Temp" / "Code")
-        for p in paths:
-            try:
-                if p.is_dir():
-                    shutil.rmtree(p, ignore_errors=True)
-                elif p.exists():
-                    p.unlink(missing_ok=True)
-            except Exception:
-                continue
 
     def _ps_quote(self, value: str) -> str:
         return "'" + value.replace("'", "''") + "'"
@@ -1858,66 +1663,6 @@ class CodexStatusPage(QtWidgets.QWidget):
             return True
         except Exception:
             return False
-
-    def _vscode_supports_command(self, code_cli: str) -> bool:
-        try:
-            creationflags = 0x08000000 if os.name == "nt" else 0
-            proc = subprocess.run([code_cli, "--help"], capture_output=True, text=True, timeout=3, creationflags=creationflags)
-        except Exception:
-            return False
-        output = (proc.stdout or "") + (proc.stderr or "")
-        return "--command" in output
-
-
-    def _load_jsonc(self, text: str) -> dict:
-        no_block = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
-        no_line = re.sub(r"//.*", "", no_block)
-        try:
-            return json.loads(no_line) if no_line.strip() else {}
-        except Exception:
-            return {}
-
-    def _ensure_open_on_startup(self, workspace: Path) -> bool:
-        settings_path = workspace / ".vscode" / "settings.json"
-        try:
-            settings_path.parent.mkdir(parents=True, exist_ok=True)
-            raw = settings_path.read_text(encoding="utf-8", errors="ignore") if settings_path.exists() else ""
-            data = self._load_jsonc(raw)
-            data["chatgpt.openOnStartup"] = True
-            settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            return True
-        except Exception:
-            return False
-
-    def _find_vscode_cli(self) -> Optional[str]:
-        for name in ("code", "code.cmd", "code.exe", "code-insiders", "code-insiders.cmd"):
-            path = shutil.which(name)
-            if path:
-                return path
-        return None
-
-    def _find_vscode_exe(self) -> Optional[str]:
-        if self._vscode_install_dir and self._vscode_install_dir.exists():
-            exe = self._find_vscode_exe_in_dir(self._vscode_install_dir)
-            if exe:
-                return exe
-        candidates = []
-        local = os.environ.get("LOCALAPPDATA")
-        program = os.environ.get("ProgramFiles") or os.environ.get("PROGRAMFILES")
-        program_x86 = os.environ.get("ProgramFiles(x86)") or os.environ.get("PROGRAMFILES(X86)")
-        if local:
-            candidates.append(Path(local) / "Programs" / "Microsoft VS Code" / "Code.exe")
-            candidates.append(Path(local) / "Programs" / "Microsoft VS Code Insiders" / "Code - Insiders.exe")
-        if program:
-            candidates.append(Path(program) / "Microsoft VS Code" / "Code.exe")
-            candidates.append(Path(program) / "Microsoft VS Code Insiders" / "Code - Insiders.exe")
-        if program_x86:
-            candidates.append(Path(program_x86) / "Microsoft VS Code" / "Code.exe")
-            candidates.append(Path(program_x86) / "Microsoft VS Code Insiders" / "Code - Insiders.exe")
-        for candidate in candidates:
-            if candidate.is_file():
-                return str(candidate)
-        return None
 
     def _get_npm_prefix_global(self) -> Optional[Path]:
         npm_exe = shutil.which("npm") or shutil.which("npm.cmd") or shutil.which("npm.exe")
@@ -3106,11 +2851,79 @@ class VSCodePluginPage(QtWidgets.QWidget):
         self._marketplace_meta: Optional[Dict[str, object]] = None
         self._index_path: Optional[Path] = None
         self._backup_dir: Optional[Path] = None
+        self._workspace_dir: Optional[Path] = None
+        self._vscode_install_dir: Optional[Path] = None
+        if isinstance(self.state.vscode_install_dir, str) and self.state.vscode_install_dir:
+            self._vscode_install_dir = Path(self.state.vscode_install_dir)
 
         layout = QtWidgets.QVBoxLayout(self)
         header = QtWidgets.QLabel("VS Code 插件")
         header.setFont(self._header_font())
         layout.addWidget(header)
+
+        launch_group = QtWidgets.QGroupBox("VS Code Codex 启动")
+        apply_white_shadow(launch_group)
+        launch_layout = QtWidgets.QVBoxLayout(launch_group)
+
+        vscode_row = QtWidgets.QHBoxLayout()
+        vscode_caption = QtWidgets.QLabel("VS Code 安装目录")
+        self.vscode_path_edit = QtWidgets.QLineEdit()
+        self.vscode_path_edit.setReadOnly(True)
+        self.vscode_path_edit.setClearButtonEnabled(False)
+        self.vscode_path_edit.setMinimumHeight(32)
+        self.vscode_path_edit.setStyleSheet(
+            "QLineEdit {"
+            "border: 1px solid #8ea6ff;"
+            "border-radius: 6px;"
+            "padding: 4px 8px;"
+            "background: #ffffff;"
+            "}"
+            "QLineEdit:read-only {"
+            "background: #f7f9ff;"
+            "}"
+        )
+        self.pick_vscode_btn = QtWidgets.QPushButton("选择目录")
+        self.pick_vscode_btn.clicked.connect(self.pick_vscode_install_dir)
+        vscode_row.addWidget(vscode_caption)
+        vscode_row.addWidget(self.vscode_path_edit, 1)
+        vscode_row.addWidget(self.pick_vscode_btn)
+        launch_layout.addLayout(vscode_row)
+
+        workspace_row = QtWidgets.QHBoxLayout()
+        workspace_caption = QtWidgets.QLabel("工作区")
+        self.workspace_path_edit = QtWidgets.QLineEdit()
+        self.workspace_path_edit.setReadOnly(True)
+        self.workspace_path_edit.setClearButtonEnabled(False)
+        self.workspace_path_edit.setMinimumHeight(32)
+        self.workspace_path_edit.setStyleSheet(
+            "QLineEdit {"
+            "border: 1px solid #8ea6ff;"
+            "border-radius: 6px;"
+            "padding: 4px 8px;"
+            "background: #ffffff;"
+            "}"
+            "QLineEdit:read-only {"
+            "background: #f7f9ff;"
+            "}"
+        )
+        self.pick_workspace_btn = QtWidgets.QPushButton("选择工作区")
+        self.pick_workspace_btn.clicked.connect(self.pick_workspace)
+        workspace_row.addWidget(workspace_caption)
+        workspace_row.addWidget(self.workspace_path_edit, 1)
+        workspace_row.addWidget(self.pick_workspace_btn)
+        launch_layout.addLayout(workspace_row)
+
+        launch_btn_row = QtWidgets.QHBoxLayout()
+        self.launch_vscode_btn = QtWidgets.QPushButton("一键启动 VS Code")
+        self.launch_vscode_btn.clicked.connect(self.launch_vscode)
+        self.fix_webview_btn = QtWidgets.QPushButton("WebView错误修改")
+        self.fix_webview_btn.clicked.connect(self.fix_webview_issue)
+        launch_btn_row.addWidget(self.launch_vscode_btn)
+        launch_btn_row.addWidget(self.fix_webview_btn)
+        launch_btn_row.addStretch(1)
+        launch_layout.addLayout(launch_btn_row)
+
+        layout.addWidget(launch_group)
 
         action_row = QtWidgets.QHBoxLayout()
         self.scan_btn = QtWidgets.QPushButton("扫描插件")
@@ -3152,9 +2965,9 @@ class VSCodePluginPage(QtWidgets.QWidget):
         apply_white_shadow(model_group)
         model_layout = QtWidgets.QFormLayout(model_group)
         self.model_edit = QtWidgets.QLineEdit()
-        self.model_edit.setPlaceholderText("gpt-5.3-codex")
-        self.model_edit.setText("gpt-5.3-codex")
-        self.apply_btn = QtWidgets.QPushButton("备份并应用")
+        self.model_edit.setPlaceholderText("gpt-5.3-codex, gpt-5.2-codex, gpt-5.2")
+        self.model_edit.setText("gpt-5.3-codex, gpt-5.2-codex, gpt-5.2")
+        self.apply_btn = QtWidgets.QPushButton("备份并增加模型")
         self.apply_btn.clicked.connect(self.apply_patch)
         self.open_backup_btn = QtWidgets.QPushButton("打开备份目录")
         self.open_backup_btn.clicked.connect(self.open_backup_dir)
@@ -3165,13 +2978,13 @@ class VSCodePluginPage(QtWidgets.QWidget):
         btn_row.addWidget(self.restore_btn)
         btn_row.addWidget(self.open_backup_btn)
         btn_row.addStretch(1)
-        model_layout.addRow("模型名称", self.model_edit)
+        model_layout.addRow("模型名称（可多个，逗号分隔）", self.model_edit)
         model_layout.addRow("操作", btn_row)
         layout.addWidget(model_group)
 
         hint = QtWidgets.QLabel(
             '<span style="color:#000;font-weight:700;">修改后请重启 VS Code 或插件。</span><br>'
-            '<span style="color:#666;">原理：工具会把你输入的模型加入可用模型列表，并放宽仅 ChatGPT 登录的限制，让 API Key 也能选到该模型。</span>'
+            '<span style="color:#666;">原理：工具会把你输入的模型加入可用模型列表，并放宽仅 ChatGPT 登录的限制，让 API Key 也能选到这些模型。</span>'
             '<ul style="margin:6px 0 0 18px; padding:0; color:#666;">'
             '<li>\u201c\u6700\u65b0\u7248\u672c\u201d\u6765\u81ea Marketplace\uff0c\u4f1a\u540c\u65f6\u663e\u793a\u7a33\u5b9a\u7248/\u9884\u89c8\u7248\uff1b\u672c\u5730\u7248\u672c\u4f1a\u7ed3\u5408\u8fdc\u7a0b\u7ed3\u679c\u6807\u6ce8\u6e20\u9053\u3002</li>'
             '<li>“恢复默认设置”会恢复最近一次备份（保留原逻辑）。</li>'
@@ -3191,7 +3004,246 @@ class VSCodePluginPage(QtWidgets.QWidget):
         return font
 
     def on_show(self) -> None:
+        self._refresh_vscode_install_label()
+        self._refresh_workspace_label()
         self.refresh_extensions()
+
+    def _refresh_vscode_install_label(self) -> None:
+        if self._vscode_install_dir and self._vscode_install_dir.exists():
+            value = str(self._vscode_install_dir)
+        else:
+            value = "未选择将使用vscode在win中的默认安装路径"
+        self.vscode_path_edit.setText(value)
+        self.vscode_path_edit.setToolTip(value)
+
+    def _refresh_workspace_label(self) -> None:
+        if self._workspace_dir and self._workspace_dir.exists():
+            value = str(self._workspace_dir)
+        else:
+            value = "未选择工作区"
+        self.workspace_path_edit.setText(value)
+        self.workspace_path_edit.setToolTip(value)
+
+    def pick_vscode_install_dir(self) -> None:
+        start_dir = str(self._vscode_install_dir) if self._vscode_install_dir else ""
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择 VS Code 安装目录", start_dir)
+        if not folder:
+            return
+        path = Path(folder)
+        exe = self._find_vscode_exe_in_dir(path)
+        if not exe:
+            message_warn(self, "提示", "未在所选目录找到 Code.exe 或 Code - Insiders.exe，请选择包含 Code.exe 的安装目录")
+            return
+        self._vscode_install_dir = path
+        self.state.vscode_install_dir = str(path)
+        self.state.store["vscode_install_dir"] = str(path)
+        save_store(self.state.store)
+        self._refresh_vscode_install_label()
+
+    def _find_vscode_exe_in_dir(self, root: Path) -> Optional[str]:
+        candidates = [
+            root / "Code.exe",
+            root / "Code - Insiders.exe",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+        return None
+
+    def pick_workspace(self) -> None:
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "选择工作区")
+        if not folder:
+            return
+        path = Path(folder)
+        if not path.exists() or not path.is_dir():
+            message_warn(self, "提示", "选择的目录无效")
+            return
+        self._workspace_dir = path
+        self._refresh_workspace_label()
+
+    def _ensure_workspace(self) -> Optional[Path]:
+        if not self._workspace_dir:
+            message_warn(self, "提示", "请先选择工作区")
+            return None
+        if not self._workspace_dir.exists():
+            message_warn(self, "提示", "工作区不存在")
+            return None
+        return self._workspace_dir
+
+    def launch_vscode(self) -> None:
+        workspace = self._ensure_workspace()
+        if not workspace:
+            return
+        code_cli = self._find_vscode_cli()
+        args = None
+        if code_cli and self._vscode_supports_command(code_cli):
+            args = [code_cli, "-r", str(workspace), "--command", "chatgpt.openSidebar"]
+        else:
+            if code_cli:
+                args = [code_cli, "-r", str(workspace)]
+            else:
+                code_exe = self._find_vscode_exe()
+                if code_exe:
+                    args = [code_exe, str(workspace)]
+            self._ensure_open_on_startup(workspace)
+        if not args:
+            message_warn(self, "提示", "未找到 VS Code，可先安装或在 PATH 中启用 code 命令")
+            return
+        try:
+            _popen_hidden_cmd_on_windows(args)
+        except Exception as exc:
+            message_error(self, "失败", str(exc))
+            return
+        message_info(self, "提示", "已打开VS Code并自动启动codex插件，如果遇到VS Code提示“WebView视图相关错误提示”，请点击“WebView错误修改”按钮。")
+
+    def fix_webview_issue(self) -> None:
+        workspace = self._ensure_workspace()
+        if not workspace:
+            return
+
+        def worker() -> None:
+            self._kill_vscode_processes()
+            self._clear_vscode_cache(self._vscode_install_dir)
+            run_in_ui(self.launch_vscode)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _kill_vscode_processes(self) -> None:
+        targets = [
+            "Code.exe",
+            "Code - Insiders.exe",
+            "msedgewebview2.exe",
+            "ServiceHub.RoslynCodeAnalysisService.exe",
+            "ServiceHub.Host.Node.x64.exe",
+            "ServiceHub.TestWindowStoreHost.exe",
+        ]
+        for name in targets:
+            try:
+                subprocess.run(["taskkill", "/F", "/T", "/IM", name], capture_output=True, text=True)
+            except Exception:
+                continue
+
+    def _clear_vscode_cache(self, install_dir: Optional[Path] = None) -> None:
+        appdata = os.environ.get("APPDATA")
+        local = os.environ.get("LOCALAPPDATA")
+        paths = []
+        channel = None
+        portable_user_data = None
+        if install_dir:
+            if (install_dir / "Code - Insiders.exe").is_file():
+                channel = "insiders"
+            elif (install_dir / "Code.exe").is_file():
+                channel = "stable"
+            portable_root = install_dir / "data" / "user-data"
+            if portable_root.is_dir():
+                portable_user_data = portable_root
+        if portable_user_data:
+            base = portable_user_data
+            paths += [
+                base / "WebView",
+                base / "CachedData",
+                base / "Cache",
+                base / "GPUCache",
+                base / "Local Storage",
+                base / "Service Worker" / "CacheStorage",
+                base / "Service Worker" / "ScriptCache",
+                base / "User" / "workspaceStorage",
+                base / "User" / "globalStorage",
+            ]
+        else:
+            if channel == "stable":
+                names = ["Code"]
+            elif channel == "insiders":
+                names = ["Code - Insiders"]
+            else:
+                names = ["Code", "Code - Insiders"]
+            if appdata:
+                base = Path(appdata)
+                for name in names:
+                    root = base / name
+                    paths += [
+                        root / "WebView",
+                        root / "CachedData",
+                        root / "Cache",
+                        root / "GPUCache",
+                        root / "Local Storage",
+                        root / "Service Worker" / "CacheStorage",
+                        root / "Service Worker" / "ScriptCache",
+                    ]
+            if local:
+                base = Path(local) / "Microsoft"
+                if channel == "stable":
+                    local_names = ["Code"]
+                elif channel == "insiders":
+                    local_names = ["Code - Insiders"]
+                else:
+                    local_names = ["Code", "Code - Insiders"]
+                for name in local_names:
+                    root = base / name
+                    paths += [
+                        root / "User" / "workspaceStorage",
+                        root / "User" / "globalStorage",
+                    ]
+                paths.append(Path(local) / "Temp" / "Code")
+        for p in paths:
+            try:
+                if p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+                elif p.exists():
+                    p.unlink(missing_ok=True)
+            except Exception:
+                continue
+
+    def _ensure_open_on_startup(self, workspace: Path) -> bool:
+        settings_path = workspace / ".vscode" / "settings.json"
+        try:
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            raw = settings_path.read_text(encoding="utf-8", errors="ignore") if settings_path.exists() else ""
+            data = self._load_jsonc(raw)
+            data["chatgpt.openOnStartup"] = True
+            settings_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            return True
+        except Exception:
+            return False
+
+    def _find_vscode_cli(self) -> Optional[str]:
+        for name in ("code", "code.cmd", "code.exe", "code-insiders", "code-insiders.cmd"):
+            path = shutil.which(name)
+            if path:
+                return path
+        return None
+
+    def _find_vscode_exe(self) -> Optional[str]:
+        if self._vscode_install_dir and self._vscode_install_dir.exists():
+            exe = self._find_vscode_exe_in_dir(self._vscode_install_dir)
+            if exe:
+                return exe
+        candidates = []
+        local = os.environ.get("LOCALAPPDATA")
+        program = os.environ.get("ProgramFiles") or os.environ.get("PROGRAMFILES")
+        program_x86 = os.environ.get("ProgramFiles(x86)") or os.environ.get("PROGRAMFILES(X86)")
+        if local:
+            candidates.append(Path(local) / "Programs" / "Microsoft VS Code" / "Code.exe")
+            candidates.append(Path(local) / "Programs" / "Microsoft VS Code Insiders" / "Code - Insiders.exe")
+        if program:
+            candidates.append(Path(program) / "Microsoft VS Code" / "Code.exe")
+            candidates.append(Path(program) / "Microsoft VS Code Insiders" / "Code - Insiders.exe")
+        if program_x86:
+            candidates.append(Path(program_x86) / "Microsoft VS Code" / "Code.exe")
+            candidates.append(Path(program_x86) / "Microsoft VS Code Insiders" / "Code - Insiders.exe")
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+        return None
+
+    def _vscode_supports_command(self, code_cli: str) -> bool:
+        try:
+            creationflags = 0x08000000 if os.name == "nt" else 0
+            proc = subprocess.run([code_cli, "--help"], capture_output=True, text=True, timeout=3, creationflags=creationflags)
+        except Exception:
+            return False
+        output = (proc.stdout or "") + (proc.stderr or "")
+        return "--command" in output
 
     def _extension_roots(self) -> List[Path]:
         homes: List[Path] = []
@@ -3274,10 +3326,10 @@ class VSCodePluginPage(QtWidgets.QWidget):
     def _parse_extension_version(self, ext_path: Path) -> str:
         name = ext_path.name
         if "openai.chatgpt-" in name:
-            return name.split("openai.chatgpt-", 1)[1] or "??"
+            return name.split("openai.chatgpt-", 1)[1] or "未知"
         if "-" in name:
             return name.rsplit("-", 1)[-1]
-        return "??"
+        return "未知"
 
     def _split_version_and_platform(self, raw_version: str) -> tuple[str, str]:
         text = str(raw_version or "").strip()
@@ -3547,78 +3599,280 @@ class VSCodePluginPage(QtWidgets.QWidget):
         except Exception as exc:
             message_error(self, "失败", str(exc))
 
-    def _apply_allowlist_patch(self, content: str) -> tuple[str, bool]:
-        if "SUe=new Set" not in content:
+    def _split_model_input(self, raw: str) -> List[str]:
+        token_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{1,120}$")
+        normalized = (raw or "").replace("，", ",").replace("；", ";")
+        parts = [p.strip() for p in re.split(r"[,;|\s]+", normalized) if p.strip()]
+        models: List[str] = []
+        seen: set[str] = set()
+        for part in parts:
+            if not token_re.match(part):
+                continue
+            key = part.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            models.append(part)
+        return models
+
+    def _target_models(self) -> List[str]:
+        defaults = ["gpt-5.3-codex", "gpt-5.2-codex", "gpt-5.2"]
+        user_models = self._split_model_input(self.model_edit.text().strip())
+        merged: List[str] = []
+        seen: set[str] = set()
+        for model in user_models + defaults:
+            key = model.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(model)
+        return merged
+
+    def _reasoning_efforts_literal(self) -> str:
+        return (
+            '[{reasoningEffort:"minimal",description:"minimal effort"},'
+            '{reasoningEffort:"low",description:"low effort"},'
+            '{reasoningEffort:"medium",description:"medium effort"},'
+            '{reasoningEffort:"high",description:"high effort"},'
+            '{reasoningEffort:"xhigh",description:"xhigh effort"}]'
+        )
+
+    def _merge_models_into_js_array(self, body: str, models: List[str]) -> tuple[str, bool]:
+        quote = '"' if '"' in body else "'"
+        existing = re.findall(r'["\']([^"\']+)["\']', body)
+        merged: List[str] = []
+        seen: set[str] = set()
+        for model in models + existing:
+            key = model.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(model)
+        new_body = ",".join(f"{quote}{item}{quote}" for item in merged)
+        changed = new_body != body
+        return new_body, changed
+
+    def _apply_allowlist_patch(self, content: str, models: List[str]) -> tuple[str, bool]:
+        set_pattern = re.compile(r'([A-Za-z_$][\w$]*)=new Set\(\[(.*?)\]\)', re.S)
+        touched = False
+
+        def repl(match: re.Match[str]) -> str:
+            nonlocal touched
+            set_name = match.group(1)
+            if "AUTH_ONLY" in set_name.upper():
+                return match.group(0)
+
+            if set_name != "SUe" and f':{set_name}).has(v.model)' not in content:
+                return match.group(0)
+
+            body = match.group(2)
+            existing = re.findall(r'["\']([^"\']+)["\']', body)
+            gpt_like_count = sum(1 for m in existing if m.startswith("gpt-"))
+            if not (
+                "gpt-5.2-codex" in existing
+                or "gpt-5.1-codex-mini" in existing
+                or gpt_like_count >= 3
+            ):
+                return match.group(0)
+
+            touched = True
+            existing_lower = {m.lower() for m in existing}
+            missing = [m for m in models if m.lower() not in existing_lower]
+            if not missing:
+                return match.group(0)
+
+            quote = '"' if '"' in body else "'"
+            prefix = ",".join(f"{quote}{m}{quote}" for m in missing)
+            new_body = f"{prefix},{body}" if body.strip() else prefix
+            return f"{match.group(1)}=new Set([{new_body}])"
+
+        updated = set_pattern.sub(repl, content)
+        if touched:
+            return updated, True
+
+        # Fallback for builds that still expose SUe only.
+        if "SUe=new Set" in content:
+            pattern = re.compile(r"SUe=new Set\(\[(.*?)\]\)")
+            match = pattern.search(content)
+            if match:
+                body = match.group(1)
+                existing = re.findall(r'["\']([^"\']+)["\']', body)
+                existing_lower = {m.lower() for m in existing}
+                missing = [m for m in models if m.lower() not in existing_lower]
+                if not missing:
+                    return content, True
+                quote = '"' if '"' in body else "'"
+                prefix = ",".join(f"{quote}{m}{quote}" for m in missing)
+                new_body = f"{prefix},{body}" if body.strip() else prefix
+                return content[: match.start(1)] + new_body + content[match.end(1) :], True
+
+        # Fallback for the newer max flow (MODEL_ORDER_BY_AUTH_METHOD).
+        model_order_pattern = re.compile(
+            r'(MODEL_ORDER_BY_AUTH_METHOD\s*=\s*\{.*?apikey\s*:\s*\[)(.*?)(\])',
+            re.S,
+        )
+        model_order_match = model_order_pattern.search(content)
+        if model_order_match:
+            body = model_order_match.group(2)
+            new_body, changed = self._merge_models_into_js_array(body, models)
+            if not changed:
+                return content, True
+            patched = content[: model_order_match.start(2)] + new_body + content[model_order_match.end(2) :]
+            return patched, True
+
+        return content, False
+
+    def _apply_chatgpt_auth_only_models_patch(self, content: str, models: List[str]) -> tuple[str, bool]:
+        if "CHAT_GPT_AUTH_ONLY_MODELS" not in content:
             return content, False
-        pattern = re.compile(r"SUe=new Set\(\[(.*?)\]\)")
+
+        pattern = re.compile(r'CHAT_GPT_AUTH_ONLY_MODELS\s*=\s*new Set\(\[(.*?)\]\)', re.S)
         match = pattern.search(content)
         if not match:
             return content, False
+
         body = match.group(1)
-        if '"gpt-5.3-codex"' in body or "'gpt-5.3-codex'" in body:
-            return content, True
         quote = '"' if '"' in body else "'"
-        new_body = f"{quote}gpt-5.3-codex{quote}," + body
-        return content[: match.start(1)] + new_body + content[match.end(1) :], True
+        existing = re.findall(r'["\']([^"\']+)["\']', body)
+        deny_set = {m.lower() for m in models}
+        filtered = [item for item in existing if item.lower() not in deny_set]
 
-    def _apply_apikey_filter_patch(self, content: str) -> tuple[str, bool]:
-        src = 'i==="chatgpt"?!0:(i==="copilot"?kUe:SUe).has(v.model)'
-        dst = 'i==="chatgpt"||i==="apikey"?!0:(i==="copilot"?kUe:SUe).has(v.model)'
-        if dst in content:
-            return content, True
-        if src not in content:
-            return content, False
-        return content.replace(src, dst, 1), True
-
-    def _apply_apikey_order_inject_patch(self, content: str) -> tuple[str, bool]:
-        if 'i==="apikey"&&(()=>{' not in content:
-            return content, False
-        if 'm.models.find(A=>A.model==="gpt-5.3-codex")||m.models.unshift({' in content:
+        # No user model in deny-list is also considered a successful match.
+        if filtered == existing:
             return content, True
 
-        src = (
-            'i==="apikey"&&(()=>{const Y=["gpt-5.3-codex","gpt-5.2-codex","gpt-5.2","gpt-5.1-codex-max",'
-            '"gpt-5.1-codex","gpt-5.1-codex-mini","gpt-5.1","gpt-5-codex-mini"],X=new Map(Y.map((A,R)=>[A,R]));'
-            'm.models.sort((A,R)=>{const D=X.get(A.model),I=X.get(R.model);return D===void 0&&I===void 0?0:D===void 0?1:I===void 0?-1:D-I})})()'
-        )
-        dst = (
-            'i==="apikey"&&(()=>{const Y=["gpt-5.3-codex","gpt-5.2-codex","gpt-5.2","gpt-5.1-codex-max",'
-            '"gpt-5.1-codex","gpt-5.1-codex-mini","gpt-5.1","gpt-5-codex-mini"],X=new Map(Y.map((A,R)=>[A,R]));'
-            'm.models.find(A=>A.model==="gpt-5.3-codex")||m.models.unshift({model:"gpt-5.3-codex",supportedReasoningEfforts:'
-            '[{reasoningEffort:"minimal",description:"minimal effort"},{reasoningEffort:"low",description:"low effort"},'
-            '{reasoningEffort:"medium",description:"medium effort"},{reasoningEffort:"high",description:"high effort"},'
-            '{reasoningEffort:"xhigh",description:"xhigh effort"}],defaultReasoningEffort:"medium"}),'
-            'm.models.sort((A,R)=>{const D=X.get(A.model),I=X.get(R.model);return D===void 0&&I===void 0?0:D===void 0?1:I===void 0?-1:D-I})})()'
-        )
-        if src in content:
-            return content.replace(src, dst, 1), True
+        new_body = ",".join(f"{quote}{item}{quote}" for item in filtered)
+        patched = content[: match.start(1)] + new_body + content[match.end(1) :]
+        return patched, True
 
-        fallback = (
-            'i==="apikey"&&(()=>{const Y=["gpt-5.3-codex","gpt-5.2-codex","gpt-5.2","gpt-5.1-codex-max",'
-            '"gpt-5.1-codex","gpt-5.1-codex-mini","gpt-5.1","gpt-5-codex-mini"],X=new Map(Y.map((A,R)=>[A,R]));'
+    def _apply_chatgpt_auth_guard_patch(self, content: str) -> tuple[str, bool]:
+        marker = "CHAT_GPT_AUTH_ONLY_MODELS.has(normalizeModel(mt))"
+        if marker not in content:
+            return content, False
+
+        already_pattern = re.compile(
+            r'[A-Za-z_$][\w$]*!=="apikey"\s*&&\s*!!mt\s*&&\s*CHAT_GPT_AUTH_ONLY_MODELS\.has\(normalizeModel\(mt\)\)'
         )
-        if fallback in content:
-            injected = (
-                fallback
-                + 'm.models.find(A=>A.model==="gpt-5.3-codex")||m.models.unshift({model:"gpt-5.3-codex",supportedReasoningEfforts:'
-                + '[{reasoningEffort:"minimal",description:"minimal effort"},{reasoningEffort:"low",description:"low effort"},'
-                + '{reasoningEffort:"medium",description:"medium effort"},{reasoningEffort:"high",description:"high effort"},'
-                + '{reasoningEffort:"xhigh",description:"xhigh effort"}],defaultReasoningEffort:"medium"}),' 
+        if already_pattern.search(content):
+            return content, True
+
+        idx = content.find(marker)
+        window = content[max(0, idx - 800) : idx]
+        auth_var = ""
+        for found in re.finditer(r'([A-Za-z_$][\w$]*)===\"(?:chatgpt|apikey)\"', window):
+            auth_var = found.group(1)
+
+        if not auth_var:
+            return content, False
+
+        tight_src = "&&!!mt&&CHAT_GPT_AUTH_ONLY_MODELS.has(normalizeModel(mt))"
+        tight_dst = f'&&{auth_var}!=="apikey"&&!!mt&&CHAT_GPT_AUTH_ONLY_MODELS.has(normalizeModel(mt))'
+        if tight_src in content:
+            return content.replace(tight_src, tight_dst, 1), True
+
+        spaced = re.compile(r'&&\s*!!mt\s*&&\s*CHAT_GPT_AUTH_ONLY_MODELS\.has\(normalizeModel\(mt\)\)')
+        matched = spaced.search(content)
+        if not matched:
+            return content, False
+
+        replacement = f'&& {auth_var}!=="apikey" && !!mt && CHAT_GPT_AUTH_ONLY_MODELS.has(normalizeModel(mt))'
+        patched = content[: matched.start()] + replacement + content[matched.end() :]
+        return patched, True
+
+    def _apply_apikey_filter_patch(self, content: str, models: List[str]) -> tuple[str, bool]:
+        patched = content
+        ok_any = False
+
+        if 'i==="chatgpt"||i==="apikey"?!0:' in patched:
+            ok_any = True
+        else:
+            src = 'i==="chatgpt"?!0:(i==="copilot"?kUe:SUe).has(v.model)'
+            dst = 'i==="chatgpt"||i==="apikey"?!0:(i==="copilot"?kUe:SUe).has(v.model)'
+            if src in patched:
+                patched = patched.replace(src, dst, 1)
+                ok_any = True
+            else:
+                pattern = re.compile(
+                    r'i==="chatgpt"\?!0:\(i==="copilot"\?([A-Za-z_$][\w$]*):([A-Za-z_$][\w$]*)\)\.has\(v\.model\)'
+                )
+                match = pattern.search(patched)
+                if match:
+                    replacement = (
+                        f'i==="chatgpt"||i==="apikey"?!0:(i==="copilot"?{match.group(1)}:{match.group(2)}).has(v.model)'
+                    )
+                    patched = patched[: match.start()] + replacement + patched[match.end() :]
+                    ok_any = True
+
+        patched, guard_ok = self._apply_chatgpt_auth_guard_patch(patched)
+        ok_any = ok_any or guard_ok
+
+        patched, set_ok = self._apply_chatgpt_auth_only_models_patch(patched, models)
+        ok_any = ok_any or set_ok
+
+        return patched, ok_any
+
+    def _apply_apikey_order_inject_patch(self, content: str, models: List[str]) -> tuple[str, bool]:
+        prefix = re.compile(
+            r'i==="apikey"&&\(\(\)=>\{const Y=\[(.*?)\],X=new Map\(Y\.map\(\(A,R\)=>\[A,R\]\)\);',
+            re.S,
+        )
+        match = prefix.search(content)
+        if not match:
+            return content, False
+
+        body = match.group(1)
+        quote = '"' if '"' in body else "'"
+        existing_y = re.findall(r'["\']([^"\']+)["\']', body)
+        y_merged: List[str] = []
+        seen: set[str] = set()
+        for model in models + existing_y:
+            key = model.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            y_merged.append(model)
+        new_y_body = ",".join(f"{quote}{m}{quote}" for m in y_merged)
+        if new_y_body != body:
+            content = content[: match.start(1)] + new_y_body + content[match.end(1) :]
+            match = prefix.search(content)
+            if not match:
+                return content, False
+
+        block_start = match.start()
+        block_end = content.find('})()', block_start)
+        if block_end == -1:
+            block_end = min(len(content), block_start + 5000)
+        sort_idx = content.find('m.models.sort(', block_start, block_end)
+        if sort_idx == -1:
+            sort_idx = content.find('m.models.sort(', block_start)
+        if sort_idx == -1:
+            return content, False
+
+        efforts = self._reasoning_efforts_literal()
+        block_segment = content[block_start:block_end]
+        injections: List[str] = []
+        for model in models:
+            marker = f'm.models.find(A=>A.model==="{model}")||m.models.unshift({{'
+            if marker in block_segment:
+                continue
+            injections.append(
+                f'm.models.find(A=>A.model==="{model}")||m.models.unshift({{model:"{model}",supportedReasoningEfforts:{efforts},defaultReasoningEffort:"medium"}}),'
             )
-            return content.replace(fallback, injected, 1), True
-        return content, False
 
-    def _apply_initial_data_patch(self, content: str) -> tuple[str, bool]:
+        if injections:
+            content = content[:sort_idx] + "".join(injections) + content[sort_idx:]
+        return content, True
+
+    def _apply_initial_data_patch(self, content: str, models: List[str]) -> tuple[str, bool]:
         if 'initialData:i==="apikey"?{data:[' not in content:
             return content, False
 
-        desired = (
-            'initialData:i==="apikey"?{data:['
-            '{model:"gpt-5.3-codex",supportedReasoningEfforts:[{reasoningEffort:"minimal",description:"minimal effort"},{reasoningEffort:"low",description:"low effort"},{reasoningEffort:"medium",description:"medium effort"},{reasoningEffort:"high",description:"high effort"},{reasoningEffort:"xhigh",description:"xhigh effort"}],defaultReasoningEffort:"medium",isDefault:!1},'
-            '{model:"gpt-5.2-codex",supportedReasoningEfforts:[{reasoningEffort:"minimal",description:"minimal effort"},{reasoningEffort:"low",description:"low effort"},{reasoningEffort:"medium",description:"medium effort"},{reasoningEffort:"high",description:"high effort"},{reasoningEffort:"xhigh",description:"xhigh effort"}],defaultReasoningEffort:"medium",isDefault:!1},'
-            '{model:"gpt-5.2",supportedReasoningEfforts:[{reasoningEffort:"minimal",description:"minimal effort"},{reasoningEffort:"low",description:"low effort"},{reasoningEffort:"medium",description:"medium effort"},{reasoningEffort:"high",description:"high effort"},{reasoningEffort:"xhigh",description:"xhigh effort"}],defaultReasoningEffort:"medium",isDefault:!1}'
-            ']}:void 0'
-        )
+        efforts = self._reasoning_efforts_literal()
+        data_entries = [
+            f'{{model:"{model}",supportedReasoningEfforts:{efforts},defaultReasoningEffort:"medium",isDefault:!1}}'
+            for model in models
+        ]
+        desired = 'initialData:i==="apikey"?{data:[' + ",".join(data_entries) + ']}:void 0'
         if desired in content:
             return content, True
 
@@ -3630,29 +3884,72 @@ class VSCodePluginPage(QtWidgets.QWidget):
 
     def apply_patch(self) -> None:
         if not self._index_path or not self._index_path.exists():
-            message_warn(self, "提示", "未找到 index 文件")
+            message_warn(self, "提示", "请先扫描并选择 index 文件")
             return
+
+        target_models = self._target_models()
+        if not target_models:
+            message_warn(self, "提示", "请输入至少一个模型名称（可用逗号分隔）")
+            return
+
         try:
             original = self._index_path.read_text(encoding="utf-8", errors="ignore")
         except Exception as exc:
             message_error(self, "失败", str(exc))
             return
 
-        backup_path = self._backup_index(self._index_path)
+        content, ok1 = self._apply_allowlist_patch(original, target_models)
+        content, ok2 = self._apply_apikey_filter_patch(content, target_models)
+        content, ok3 = self._apply_apikey_order_inject_patch(content, target_models)
+        content, ok4 = self._apply_initial_data_patch(content, target_models)
 
-        content, ok1 = self._apply_allowlist_patch(original)
-        content, ok2 = self._apply_apikey_filter_patch(content)
-        content, ok3 = self._apply_apikey_order_inject_patch(content)
-        content, ok4 = self._apply_initial_data_patch(content)
-        if not (ok1 and ok2 and ok3 and ok4):
-            message_error(self, "失败", "未能定位关键片段，可能与当前插件版本不匹配")
+        critical_failed = []
+        if not ok1:
+            critical_failed.append("allowlist/model-order")
+        if not ok2:
+            critical_failed.append("apikey-filter/auth-only")
+
+        if critical_failed:
+            message_error(
+                self,
+                "失败",
+                "未能定位关键片段："
+                + ", ".join(critical_failed)
+                + "。\n"
+                + "请先点击“扫描插件”，并确认选择的是目标扩展的 index-*.js 文件。",
+            )
             return
+
+        backup_path = self._backup_index(self._index_path)
         try:
             self._index_path.write_text(content, encoding="utf-8")
         except Exception as exc:
             message_error(self, "失败", str(exc))
             return
-        self.status_label.setText(f"已备份并应用：{backup_path}")
+
+        optional_failed = []
+        if not ok3:
+            optional_failed.append("apikey-order")
+        if not ok4:
+            optional_failed.append("initial-data")
+
+        if optional_failed:
+            message_warn(
+                self,
+                "提示",
+                "模型已增加，但部分规则未更新："
+                + ", ".join(optional_failed)
+                + "。\n"
+                + "可重启 VS Code 后验证模型下拉；若仍缺失可改用手动 index 文件。",
+            )
+
+        preview = ", ".join(target_models[:5])
+        if len(target_models) > 5:
+            preview += ", ..."
+        if optional_failed:
+            self.status_label.setText(f"模型已增加（部分规则未更新），备份：{backup_path}；模型：{preview}")
+        else:
+            self.status_label.setText(f"模型已增加，规则已更新，备份：{backup_path}；模型：{preview}")
 
     def _settings_paths(self) -> List[Path]:
         appdata = os.environ.get("APPDATA")
@@ -3798,13 +4095,13 @@ class SettingsPage(QtWidgets.QWidget):
         add_root(exe_dir)
         add_root(cwd)
 
-        # ??????????<project>/dist/CodexSwitcher.exe
+        # Expected binary path: <project>/dist/CodexSwitcher.exe
         add_root(exe_dir.parent)
         add_root(exe_dir.parent.parent)
         if exe_dir.name.lower() == "dist":
             add_root(exe_dir.parent)
 
-        # ???????? dist ??????????
+        # Some builds flatten everything directly under dist.
         for root in list(roots):
             add_root(root / "dist")
 
@@ -5421,12 +5718,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._nav_button_map: Dict[str, QtWidgets.QPushButton] = {}
         self._settings_nav_btn: Optional[NavBadgeButton] = None
         self._add_nav_button(nav, "Codex CLI状态", "codex_status")
+        self._add_nav_button(nav, "VSCode Codex", "vscode_plugin")
         self._add_nav_button(nav, "config.toml配置", "config_toml")
         self._add_nav_button(nav, "opencode 配置", "opencode")
         self._add_nav_button(nav, "多账号切换", "account")
         self._add_nav_button(nav, "Codex会话管理", "sessions")
         self._add_nav_button(nav, "Skill 管理", "skills")
-        self._add_nav_button(nav, "VScode codex", "vscode_plugin")
         self._add_nav_button(nav, "中转站接口", "network")
         self._add_nav_button(nav, "OpenAI官网状态", "openai_status")
         self._add_nav_button(nav, "检查更新", "settings")
