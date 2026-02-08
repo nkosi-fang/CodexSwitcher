@@ -57,7 +57,7 @@ from codex_switcher import (
 
 
 APP_TITLE = "Codex Switcher"
-APP_VERSION = "2.0.7"
+APP_VERSION = "2.0.8"
 APP_REPO = "nkosi-fang/CodexSwitcher"
 
 CODING_COMPONENTS = [
@@ -3810,6 +3810,14 @@ class VSCodePluginPage(QtWidgets.QWidget):
 
         return patched, gate_ok
 
+    def _is_apikey_dynamic_model_flow(self, content: str) -> bool:
+        if "listModels" not in content or "modelsByType" not in content:
+            return False
+        gate_pattern = re.compile(
+            r'i===\"chatgpt\"\s*\|\|\s*i===\"apikey\"\s*\?!0:\(i===\"copilot\"\?[A-Za-z_$][\w$]*:[A-Za-z_$][\w$]*\)\.has\(v\.model\)'
+        )
+        return gate_pattern.search(content) is not None
+
 
     def _apply_apikey_order_inject_patch(self, content: str, models: List[str]) -> tuple[str, bool]:
         prefix = re.compile(
@@ -3818,6 +3826,8 @@ class VSCodePluginPage(QtWidgets.QWidget):
         )
         match = prefix.search(content)
         if not match:
+            if self._is_apikey_dynamic_model_flow(content):
+                return content, True
             return content, False
 
         body = match.group(1)
@@ -3846,6 +3856,8 @@ class VSCodePluginPage(QtWidgets.QWidget):
         if sort_idx == -1:
             sort_idx = content.find('m.models.sort(', block_start)
         if sort_idx == -1:
+            if self._is_apikey_dynamic_model_flow(content):
+                return content, True
             return content, False
 
         efforts = self._reasoning_efforts_literal()
@@ -3865,6 +3877,8 @@ class VSCodePluginPage(QtWidgets.QWidget):
 
     def _apply_initial_data_patch(self, content: str, models: List[str]) -> tuple[str, bool]:
         if 'initialData:i==="apikey"?{data:[' not in content:
+            if self._is_apikey_dynamic_model_flow(content):
+                return content, True
             return content, False
 
         efforts = self._reasoning_efforts_literal()
@@ -3879,6 +3893,8 @@ class VSCodePluginPage(QtWidgets.QWidget):
         pattern = re.compile(r'initialData:i===\"apikey\"\?\{data:\[(.*?)\]\}:void 0', re.S)
         match = pattern.search(content)
         if not match:
+            if self._is_apikey_dynamic_model_flow(content):
+                return content, True
             return content, False
         return content[: match.start()] + desired + content[match.end() :], True
 

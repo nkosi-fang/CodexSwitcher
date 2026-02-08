@@ -12,6 +12,9 @@ class ApplyApiKeyFilterPatchTests(unittest.TestCase):
             "_apply_chatgpt_auth_only_models_patch",
             "_apply_chatgpt_auth_guard_patch",
             "_apply_apikey_filter_patch",
+            "_is_apikey_dynamic_model_flow",
+            "_apply_apikey_order_inject_patch",
+            "_apply_initial_data_patch",
         ):
             setattr(obj, name, getattr(cls, name).__get__(obj, SimpleNamespace))
         return obj
@@ -43,6 +46,43 @@ class ApplyApiKeyFilterPatchTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertNotIn('i==="chatgpt"||i==="apikey"?!0:', patched)
+
+    def test_optional_apikey_order_rule_treated_as_ok_for_dynamic_flow(self):
+        subject = self._build_subject()
+        models = ["gpt-5.3-codex"]
+        content = (
+            'function Jv(){return {listModels:1,modelsByType:1};}'
+            'gate=i==="chatgpt"||i==="apikey"?!0:(i==="copilot"?kUe:SUe).has(v.model);'
+        )
+
+        patched, ok = subject._apply_apikey_order_inject_patch(content, models)
+
+        self.assertTrue(ok)
+        self.assertEqual(patched, content)
+
+    def test_optional_initial_data_rule_treated_as_ok_for_dynamic_flow(self):
+        subject = self._build_subject()
+        models = ["gpt-5.3-codex"]
+        content = (
+            'function Jv(){return {listModels:1,modelsByType:1};}'
+            'gate=i==="chatgpt"||i==="apikey"?!0:(i==="copilot"?kUe:SUe).has(v.model);'
+        )
+
+        patched, ok = subject._apply_initial_data_patch(content, models)
+
+        self.assertTrue(ok)
+        self.assertEqual(patched, content)
+
+    def test_optional_rules_still_fail_without_dynamic_flow_markers(self):
+        subject = self._build_subject()
+        models = ["gpt-5.3-codex"]
+        content = 'gate=i==="chatgpt"||i==="apikey"?!0:(i==="copilot"?kUe:SUe).has(v.model);'
+
+        _, order_ok = subject._apply_apikey_order_inject_patch(content, models)
+        _, init_ok = subject._apply_initial_data_patch(content, models)
+
+        self.assertFalse(order_ok)
+        self.assertFalse(init_ok)
 
 
 
