@@ -57,7 +57,7 @@ from codex_switcher import (
 
 
 APP_TITLE = "Codex Switcher"
-APP_VERSION = "2.0.8"
+APP_VERSION = "2.0.9"
 APP_REPO = "nkosi-fang/CodexSwitcher"
 
 CODING_COMPONENTS = [
@@ -3818,6 +3818,75 @@ class VSCodePluginPage(QtWidgets.QWidget):
         )
         return gate_pattern.search(content) is not None
 
+    def _apply_dynamic_apikey_models_patch(self, content: str, models: List[str]) -> tuple[str, bool]:
+        gate_pattern = re.compile(
+            r'([A-Za-z_$][\w$]*)===\"chatgpt\"\|\|\1===\"apikey\"\?!0:\(\1===\"copilot\"\?[A-Za-z_$][\w$]*:[A-Za-z_$][\w$]*\)\.has\(([A-Za-z_$][\w$]*)\.model\)'
+        )
+        gate_match = gate_pattern.search(content)
+        if not gate_match:
+            return content, False
+
+        auth_var = gate_match.group(1)
+        window_start = max(0, gate_match.start() - 900)
+        window_end = min(len(content), gate_match.end() + 1800)
+        window = content[window_start:window_end]
+
+        models_var_match = re.search(r',([A-Za-z_$][\w$]*)=\{models:\[\]\};', window)
+        if not models_var_match:
+            return content, False
+        models_var = models_var_match.group(1)
+
+        anchor = f',{{modelsByType:{models_var},defaultModel:'
+        insert_at = content.find(anchor, gate_match.end(), gate_match.end() + 2600)
+        if insert_at == -1:
+            insert_at = content.find(anchor, max(0, gate_match.start() - 800))
+        if insert_at == -1:
+            return content, False
+
+        marker = '__csDynamicModels=['
+        marker_pos = content.find(marker, max(0, gate_match.start() - 500), insert_at)
+        if marker_pos != -1:
+            list_start = marker_pos + len(marker)
+            list_end = content.find(']', list_start)
+            if list_end == -1:
+                return content, False
+            body = content[list_start:list_end]
+            existing = re.findall(r'["\']([^"\']+)["\']', body)
+            merged: List[str] = []
+            seen: set[str] = set()
+            for model in models + existing:
+                key = model.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(model)
+            quote = '"' if '"' in body else "'"
+            new_body = ",".join(f"{quote}{item}{quote}" for item in merged)
+            if new_body == body:
+                return content, True
+            return content[:list_start] + new_body + content[list_end:], True
+
+        merged_models: List[str] = []
+        seen_models: set[str] = set()
+        for model in models:
+            key = model.lower()
+            if key in seen_models:
+                continue
+            seen_models.add(key)
+            merged_models.append(model)
+
+        if not merged_models:
+            return content, True
+
+        efforts = self._reasoning_efforts_literal()
+        models_body = ",".join(f'"{item}"' for item in merged_models)
+        injection = (
+            f',{auth_var}==="apikey"&&(()=>{{const __csDynamicModels=[{models_body}],__csDynamicEfforts={efforts};'
+            f'__csDynamicModels.forEach(__csModel=>{{{models_var}.models.find(__csItem=>__csItem.model===__csModel)||'
+            f'{models_var}.models.unshift({{model:__csModel,supportedReasoningEfforts:__csDynamicEfforts,defaultReasoningEffort:"medium",isDefault:!1}})}})}})()'
+        )
+        return content[:insert_at] + injection + content[insert_at:], True
+
 
     def _apply_apikey_order_inject_patch(self, content: str, models: List[str]) -> tuple[str, bool]:
         prefix = re.compile(
@@ -3827,7 +3896,7 @@ class VSCodePluginPage(QtWidgets.QWidget):
         match = prefix.search(content)
         if not match:
             if self._is_apikey_dynamic_model_flow(content):
-                return content, True
+                return self._apply_dynamic_apikey_models_patch(content, models)
             return content, False
 
         body = match.group(1)
@@ -3857,7 +3926,7 @@ class VSCodePluginPage(QtWidgets.QWidget):
             sort_idx = content.find('m.models.sort(', block_start)
         if sort_idx == -1:
             if self._is_apikey_dynamic_model_flow(content):
-                return content, True
+                return self._apply_dynamic_apikey_models_patch(content, models)
             return content, False
 
         efforts = self._reasoning_efforts_literal()

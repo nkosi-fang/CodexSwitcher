@@ -13,8 +13,10 @@ class ApplyApiKeyFilterPatchTests(unittest.TestCase):
             "_apply_chatgpt_auth_guard_patch",
             "_apply_apikey_filter_patch",
             "_is_apikey_dynamic_model_flow",
+            "_apply_dynamic_apikey_models_patch",
             "_apply_apikey_order_inject_patch",
             "_apply_initial_data_patch",
+            "_reasoning_efforts_literal",
         ):
             setattr(obj, name, getattr(cls, name).__get__(obj, SimpleNamespace))
         return obj
@@ -47,18 +49,21 @@ class ApplyApiKeyFilterPatchTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertNotIn('i==="chatgpt"||i==="apikey"?!0:', patched)
 
-    def test_optional_apikey_order_rule_treated_as_ok_for_dynamic_flow(self):
+    def test_dynamic_flow_injects_apikey_models_when_static_order_rule_is_missing(self):
         subject = self._build_subject()
         models = ["gpt-5.3-codex"]
         content = (
             'function Jv(){return {listModels:1,modelsByType:1};}'
-            'gate=i==="chatgpt"||i==="apikey"?!0:(i==="copilot"?kUe:SUe).has(v.model);'
+            'u=h=>{const{data:f}=h,m={models:[]};let g=null;return '
+            'f.forEach(v=>{if(i==="chatgpt"||i==="apikey"?!0:(i==="copilot"?kUe:SUe).has(v.model))'
+            '{m.models.push(v),g=v.isDefault?v:g}}),{modelsByType:m,defaultModel:g}};'
         )
 
         patched, ok = subject._apply_apikey_order_inject_patch(content, models)
 
         self.assertTrue(ok)
-        self.assertEqual(patched, content)
+        self.assertIn('__csDynamicModels=["gpt-5.3-codex"]', patched)
+        self.assertIn('i==="apikey"&&(()=>{const __csDynamicModels=', patched)
 
     def test_optional_initial_data_rule_treated_as_ok_for_dynamic_flow(self):
         subject = self._build_subject()
@@ -72,6 +77,25 @@ class ApplyApiKeyFilterPatchTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(patched, content)
+
+
+    def test_dynamic_flow_patch_merges_models_when_marker_already_exists(self):
+        subject = self._build_subject()
+        models = ["gpt-5.3-codex", "gpt-5.2-codex"]
+        content = (
+            'function Jv(){return {listModels:1,modelsByType:1};}'
+            'u=h=>{const{data:f}=h,m={models:[]};let g=null;return '
+            'f.forEach(v=>{if(i==="chatgpt"||i==="apikey"?!0:(i==="copilot"?kUe:SUe).has(v.model))'
+            '{m.models.push(v),g=v.isDefault?v:g}}),'
+            'i==="apikey"&&(()=>{const __csDynamicModels=["gpt-5.2-codex"],__csDynamicEfforts=[];'
+            '__csDynamicModels.forEach(__csModel=>{m.models.find(__csItem=>__csItem.model===__csModel)||'
+            'm.models.unshift({model:__csModel,supportedReasoningEfforts:__csDynamicEfforts,defaultReasoningEffort:"medium",isDefault:!1})})(),{modelsByType:m,defaultModel:g}};'
+        )
+
+        patched, ok = subject._apply_apikey_order_inject_patch(content, models)
+
+        self.assertTrue(ok)
+        self.assertIn('__csDynamicModels=["gpt-5.3-codex","gpt-5.2-codex"]', patched)
 
     def test_optional_rules_still_fail_without_dynamic_flow_markers(self):
         subject = self._build_subject()

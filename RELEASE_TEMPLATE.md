@@ -1,19 +1,20 @@
 # Release 模板
 
 ## 标题
-v2.0.8 (Windows)
+v2.0.9 (Windows)
 
 ## 下载
-- CodexSwitcher_v2.0.8.exe
+- CodexSwitcher_v2.0.9.exe
 
 ## 校验（可选）
-SHA256: 246e57b6a2dec823ed8d630c4e4622b2890db1aecdef6d62e15305931603f463
-MD5:    c63da1f61e5e9839c5017037faa01311
+SHA256: a22048d42681fa2fa262b6b3a0ca6c0050178b887844f365ae80354315a7dfc4
+MD5:    a3ef0353ff89fd68e9bcba251c07b585
 
 ## 首次运行提示
 - 如首次运行出现 Windows SmartScreen 提示，这是因为未进行代码签名；请确认下载来源为 GitHub Releases，并核对 SHA256 后再运行。
 
 ## 变更
-- 修复部分用户反馈的“一键增加vscode codex模型”功能在Windows环境中出现：“模型已增加，但部分规则未更新：apikey-order、initial-data。
-可重启VS Code后验证模型下拉；若仍可修改用手动索引文件”的已知错误提示。
-- 版本号升级为 v2.0.8，并完成 Windows 可执行文件重新打包。
+- 修复 VSCode Codex 插件走“动态模型流”时，“一键增加模型”后模型下拉未出现 `gpt-5.3-codex` 的问题。
+- 提示：该补丁依赖官方插件当前实现细节，后续 OpenAI 插件更新可能导致失效；如遇异常请及时反馈，并关注我们的最新版本。
+- 修复“检查更新”页开发者反馈二维码不显示（打包内置 `developer_qr.png`）。
+- v2.0.9 重新打包发布（Windows）。

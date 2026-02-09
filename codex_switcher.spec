@@ -16,9 +16,12 @@ except Exception:
     pass
 
 icon_path = project_root / "icon_app.ico"
+developer_qr_path = project_root / "developer_qr.png"
 
 all_datas = []
 all_datas.append((str(project_root / "icon_tray.png"), "."))
+if developer_qr_path.exists():
+    all_datas.append((str(developer_qr_path), "."))
 all_binaries = []
 all_hidden = []
 for pkg in ("qt_material",):
